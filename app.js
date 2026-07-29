@@ -570,8 +570,9 @@ function mergeImageGroup(group){
   const ps = group.map(g=>g.p);
   const dists = ps.map(p=>p.distanceKm).filter(v=>v!=null);
   const durs  = ps.map(p=>p.durationSec).filter(v=>v!=null);
-  const distanceKm  = dists.length? Math.max(...dists) : null; // 총거리 = 최댓값
-  const durationSec = durs.length?  Math.max(...durs)  : null; // 총시간 = 최댓값
+  // 총거리/총시간은 요약(primary) 값을 신뢰, 없으면 최댓값
+  const distanceKm  = primary.p.distanceKm!=null ? primary.p.distanceKm : (dists.length? Math.max(...dists):null);
+  const durationSec = primary.p.durationSec!=null ? primary.p.durationSec : (durs.length? Math.max(...durs):null);
   const pick = (f)=> primary.p[f]!=null ? primary.p[f] : median(ps.map(p=>p[f])); // 요약값 우선
   let avgPaceSec = pick('avgPaceSec');
   const avgHr = pick('avgHr'), cadence = pick('cadence');
@@ -589,23 +590,30 @@ function mergeImageGroup(group){
   return rec;
 }
 
-/* 요약↔스플릿 매칭 비용: 거리·시간·페이스·구간수·심박을 연속 점수로 종합.
-   - 각 신호의 상대 오차를 스케일로 정규화해 합산(작을수록 잘 맞음)
-   - 2개 이상 신호가 '강하게' 불일치하면 서로 다른 러닝 → Infinity
-   - sp=스플릿쪽 프로필, sm=요약쪽 프로필 */
+/* 요약↔스플릿 매칭 비용 (정확도 우선).
+   같은 러닝이면 스플릿 합계와 요약 수치가 '매우' 근접해야 함.
+   신뢰도 높은 신호는 하드 게이트: 하나라도 크게 어긋나면 즉시 배제(Infinity).
+   sp=스플릿쪽 프로필, sm=요약쪽 프로필 */
 function matchCost(sp, sm){
-  const terms=[]; let strong=0;
-  const add=(diff, scale, hardX)=>{ terms.push(Math.min(diff/scale, 3)); if(diff > scale*hardX) strong++; };
-  if(sp.dist!=null && sm.dist!=null) add(Math.abs(sp.dist-sm.dist), 0.5, 3);   // 0.5km, 강불일치 >1.5km
-  if(sp.time!=null && sm.time!=null) add(Math.abs(sp.time-sm.time), 45, 3);    // 45s,   강불일치 >135s
-  if(sp.pace!=null && sm.pace!=null) add(Math.abs(sp.pace-sm.pace), 25, 3);    // 25s/km,강불일치 >75
-  if(sp.rows && sm.dist!=null)       add(Math.abs(sp.rows-Math.ceil(sm.dist)), 1, 3); // 구간수, 강불일치 >3
-  if(sp.hr!=null && sm.hr!=null)     add(Math.abs(sp.hr-sm.hr), 6, 4);         // 6bpm,  강불일치 >24
-  if(strong>=2) return Infinity;                 // 다른 러닝
-  // 촬영 시각 근접(같은 러닝의 요약·스플릿은 보통 몇 분 내 촬영) → 소프트 보너스(강불일치 없음)
-  if(sp.mtime && sm.mtime) terms.push(Math.min(Math.abs(sp.mtime-sm.mtime)/60000/5, 2)); // 5분 스케일
-  if(!terms.length) return 50;                   // 데이터 없음 → 약한 매칭(최후)
-  return terms.reduce((a,b)=>a+b,0)/terms.length;
+  // ── 하드 게이트: 같은 러닝이라면 반드시 통과해야 하는 조건 ──
+  if(sp.dist!=null && sm.dist!=null && Math.abs(sp.dist-sm.dist) > 0.7) return Infinity;         // 거리 0.7km↑ 차 → 다른 러닝
+  if(sp.time!=null && sm.time!=null && Math.abs(sp.time-sm.time) > 75)  return Infinity;         // 총시간 75초↑ 차
+  if(sp.rows   && sm.dist!=null && Math.abs(sp.rows-Math.ceil(sm.dist)) > 2) return Infinity;    // 구간 수 ≠ 거리
+  if(sp.pace!=null && sm.pace!=null && Math.abs(sp.pace-sm.pace) > 45)  return Infinity;         // 평균 페이스 45초/km↑ 차
+  if(sp.hr!=null   && sm.hr!=null   && Math.abs(sp.hr-sm.hr)   > 18)    return Infinity;         // 평균 심박 18bpm↑ 차
+
+  // ── 확증: 비교 가능한 '강한 신호'(거리/시간/구간수)가 최소 하나는 있어야 매칭 ──
+  const strongCmp = (sp.dist!=null&&sm.dist!=null) || (sp.time!=null&&sm.time!=null) || (sp.rows&&sm.dist!=null);
+  if(!strongCmp) return Infinity;
+
+  const terms=[];
+  if(sp.dist!=null&&sm.dist!=null) terms.push(Math.abs(sp.dist-sm.dist)/0.5);
+  if(sp.time!=null&&sm.time!=null) terms.push(Math.abs(sp.time-sm.time)/45);
+  if(sp.pace!=null&&sm.pace!=null) terms.push(Math.abs(sp.pace-sm.pace)/25);
+  if(sp.rows&&sm.dist!=null)       terms.push(Math.abs(sp.rows-Math.ceil(sm.dist))/1);
+  if(sp.hr!=null&&sm.hr!=null)     terms.push(Math.abs(sp.hr-sm.hr)/6);
+  if(sp.mtime&&sm.mtime)           terms.push(Math.min(Math.abs(sp.mtime-sm.mtime)/60000/5, 2)); // 촬영시각 5분 스케일(보조)
+  return terms.length ? terms.reduce((a,b)=>a+b,0)/terms.length : Infinity;
 }
 function itemProfile(it){
   return { dist:it.p.distanceKm, time:it.p.durationSec, pace:it.p.avgPaceSec, hr:it.p.avgHr,
@@ -757,7 +765,7 @@ async function handleFiles(files){
         cost[i][j] = isFinite(c) ? c : FORBID;   // 다른 러닝(강불일치)은 금지 비용
       }
       const assign=hungarian(cost);
-      const ACCEPT=4.0;                            // 실제 신호 비용(0~3대)은 수용, FORBID/DUMMY는 거부
+      const ACCEPT=2.5;                            // 하드게이트 통과한 실제 비용만 수용, FORBID/DUMMY 거부
       for(let i=0;i<nS;i++){
         const j=assign[i];
         if(j>=0 && j<nM && cost[i][j] < ACCEPT){ usedS.add(i); pairForM[j]=i; }
