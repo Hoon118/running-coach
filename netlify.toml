@@ -1,0 +1,14 @@
+# Netlify 배포 설정 (빌드 없는 정적 PWA)
+[build]
+  publish = "."
+
+# 서비스워커는 항상 최신을 받도록 캐시 최소화 → 업데이트 즉시 반영
+[[headers]]
+  for = "/sw.js"
+  [headers.values]
+    Cache-Control = "no-cache"
+
+[[headers]]
+  for = "/index.html"
+  [headers.values]
+    Cache-Control = "no-cache"

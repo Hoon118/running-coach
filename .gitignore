@@ -1,0 +1,11 @@
+# 배포용 중복 폴더 (루트 자체를 배포하므로 불필요)
+deploy/
+
+# 로컬 전용 자료/스크립트 (공개 배포 대상 아님)
+generate-icons.ps1
+NSM*.txt
+
+# OS / 기타
+.DS_Store
+Thumbs.db
+node_modules/

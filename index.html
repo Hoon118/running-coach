@@ -1,0 +1,372 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1, user-scalable=no" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+<meta name="apple-mobile-web-app-title" content="런코치" />
+<meta name="theme-color" content="#0b0f14" />
+<link rel="manifest" href="manifest.json" />
+<link rel="apple-touch-icon" href="icon-192.png" />
+<title>런코치 · 마라톤 러닝 코치</title>
+<style>
+:root{
+  --bg:#0b0f14; --bg2:#111823; --card:#151d2a; --card2:#1b2634;
+  --line:#233044; --txt:#e9eef5; --sub:#8ea0b6;
+  --mut:#6b7d94; --acc:#ff6a3d; --acc2:#ffb03d; --ok:#39d98a; --warn:#ffd166;
+  --bad:#ff5d6c; --blue:#4aa8ff; --purple:#a78bfa; --safe-b:env(safe-area-inset-bottom);
+}
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+html,body{margin:0;padding:0;background:var(--bg);color:var(--txt);
+  font-family:-apple-system,BlinkMacSystemFont,"SF Pro","Apple SD Gothic Neo","Malgun Gothic",system-ui,sans-serif;
+  -webkit-font-smoothing:antialiased;overscroll-behavior-y:none}
+body{padding-bottom:calc(72px + env(safe-area-inset-bottom))}
+a{color:var(--blue)}
+h1,h2,h3,h4{margin:0;font-weight:700;letter-spacing:-0.01em}
+button{font-family:inherit;cursor:pointer;border:none;background:none;color:inherit}
+.hidden{display:none !important}
+
+/* 상단 헤더 */
+header.app{position:sticky;top:0;z-index:30;padding:calc(env(safe-area-inset-top) + 12px) 16px 12px;
+  background:linear-gradient(180deg,rgba(11,15,20,.96),rgba(11,15,20,.78));backdrop-filter:blur(12px);
+  border-bottom:1px solid var(--line);display:flex;align-items:center;gap:10px}
+header.app .logo{width:34px;height:34px;border-radius:10px;background:linear-gradient(135deg,var(--acc),var(--acc2));
+  display:flex;align-items:center;justify-content:center;font-size:18px;box-shadow:0 4px 14px rgba(255,106,61,.35)}
+header.app h1{font-size:17px}
+header.app .sub{font-size:11px;color:var(--sub);margin-top:1px}
+header.app .spacer{flex:1}
+.iconbtn{width:38px;height:38px;border-radius:11px;background:var(--card);border:1px solid var(--line);
+  display:flex;align-items:center;justify-content:center;font-size:17px}
+
+/* 페이지 컨테이너 */
+main{padding:16px 16px 24px;max-width:640px;margin:0 auto}
+.page{display:none;animation:fade .25s ease}
+.page.active{display:block}
+@keyframes fade{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
+
+/* 카드 */
+.card{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:16px;margin-bottom:14px}
+.card.tight{padding:13px}
+.card h2{font-size:15px;margin-bottom:4px}
+.card .desc{font-size:12px;color:var(--sub);margin-bottom:12px;line-height:1.5}
+.row{display:flex;gap:10px}
+.row.wrap{flex-wrap:wrap}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.grid3{display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px}
+.sectitle{font-size:12px;color:var(--sub);text-transform:uppercase;letter-spacing:.08em;margin:18px 2px 10px;font-weight:700}
+
+/* 통계 타일 */
+.stat{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:14px}
+.stat .k{font-size:11px;color:var(--sub);margin-bottom:6px}
+.stat .v{font-size:22px;font-weight:800;letter-spacing:-0.02em}
+.stat .v small{font-size:12px;color:var(--sub);font-weight:600}
+.stat .d{font-size:11px;margin-top:4px}
+.up{color:var(--ok)} .down{color:var(--bad)} .flat{color:var(--sub)}
+
+/* 버튼 */
+.btn{display:inline-flex;align-items:center;justify-content:center;gap:8px;padding:12px 16px;border-radius:13px;
+  background:var(--card2);border:1px solid var(--line);font-weight:700;font-size:14px;color:var(--txt)}
+.btn.block{width:100%}
+.btn.primary{background:linear-gradient(135deg,var(--acc),var(--acc2));border:none;color:#1a0f08;box-shadow:0 6px 18px rgba(255,106,61,.3)}
+.btn.ghost{background:transparent}
+.btn.sm{padding:8px 12px;font-size:12px;border-radius:10px}
+.btn.danger{color:var(--bad);border-color:rgba(255,93,108,.3)}
+.btn:active{transform:scale(.98)}
+
+/* 태그 / 배지 */
+.tag{display:inline-flex;align-items:center;gap:5px;padding:4px 9px;border-radius:999px;font-size:11px;font-weight:700}
+.tag.nsm{background:rgba(167,139,250,.16);color:var(--purple)}
+.tag.tempo{background:rgba(255,176,61,.16);color:var(--acc2)}
+.tag.interval{background:rgba(255,93,108,.16);color:var(--bad)}
+.tag.lsd{background:rgba(74,168,255,.16);color:var(--blue)}
+.tag.recovery{background:rgba(57,217,138,.16);color:var(--ok)}
+.tag.easy{background:rgba(142,160,182,.16);color:var(--sub)}
+.tag.rest{background:rgba(107,125,148,.14);color:var(--mut)}
+.tag.race{background:rgba(255,106,61,.18);color:var(--acc)}
+
+/* 입력 */
+label.f{display:block;font-size:12px;color:var(--sub);margin:12px 0 6px;font-weight:600}
+input,select,textarea{width:100%;padding:12px;border-radius:12px;background:var(--bg2);border:1px solid var(--line);
+  color:var(--txt);font-size:15px;font-family:inherit}
+input:focus,select:focus,textarea:focus{outline:none;border-color:var(--acc)}
+textarea{min-height:90px;resize:vertical}
+.inline{display:flex;gap:10px}.inline>*{flex:1}
+
+/* 플랜 데이 */
+.day{display:flex;gap:12px;align-items:flex-start;padding:12px;border:1px solid var(--line);border-radius:14px;
+  background:var(--card);margin-bottom:10px}
+.day .dd{width:44px;text-align:center;flex-shrink:0}
+.day .dd .dn{font-size:11px;color:var(--sub)}
+.day .dd .dnum{font-size:18px;font-weight:800}
+.day .body{flex:1;min-width:0}
+.day .body .t{font-size:14px;font-weight:700;margin-bottom:2px;display:flex;align-items:center;gap:6px;flex-wrap:wrap}
+.day .body .meta{font-size:12px;color:var(--sub);line-height:1.5}
+.day.done{opacity:.55}
+.chk{width:26px;height:26px;border-radius:8px;border:2px solid var(--line);display:flex;align-items:center;
+  justify-content:center;flex-shrink:0;font-size:14px;color:var(--ok)}
+.chk.on{background:rgba(57,217,138,.15);border-color:var(--ok)}
+
+/* 기록 리스트 */
+.rec{display:flex;gap:12px;padding:12px;border:1px solid var(--line);border-radius:14px;background:var(--card);margin-bottom:10px;align-items:center}
+.rec .thumb{width:52px;height:52px;border-radius:11px;background:var(--bg2);object-fit:cover;flex-shrink:0;
+  display:flex;align-items:center;justify-content:center;font-size:22px;overflow:hidden}
+.rec .thumb img{width:100%;height:100%;object-fit:cover}
+.rec .info{flex:1;min-width:0}
+.rec .info .a{font-size:14px;font-weight:700;display:flex;gap:6px;align-items:center;flex-wrap:wrap}
+.rec .info .b{font-size:12px;color:var(--sub);margin-top:3px}
+.rec .del{color:var(--mut);font-size:18px;padding:6px}
+
+/* 러닝화 */
+.shoe{padding:14px;border:1px solid var(--line);border-radius:14px;background:var(--card);margin-bottom:10px}
+.shoe .top{display:flex;justify-content:space-between;align-items:center;gap:8px}
+.shoe .name{font-size:15px;font-weight:800}
+.shoe .brand{font-size:11px;color:var(--sub)}
+.bar{height:9px;border-radius:6px;background:var(--bg2);overflow:hidden;margin:10px 0 6px}
+.bar>i{display:block;height:100%;border-radius:6px;background:linear-gradient(90deg,var(--ok),var(--acc2))}
+.bar.warn>i{background:linear-gradient(90deg,var(--acc2),var(--acc))}
+.bar.bad>i{background:linear-gradient(90deg,var(--acc),var(--bad))}
+.shoe .km{display:flex;justify-content:space-between;font-size:12px;color:var(--sub)}
+
+/* 실시간 러닝 */
+.live-main{text-align:center;padding:24px 0 8px}
+.live-main .pace{font-size:64px;font-weight:800;letter-spacing:-0.03em;line-height:1;font-variant-numeric:tabular-nums}
+.live-main .pace small{font-size:18px;color:var(--sub);font-weight:600}
+.live-main .lbl{font-size:12px;color:var(--sub);margin-top:8px;letter-spacing:.1em;text-transform:uppercase}
+.live-grid{display:grid;grid-template-columns:1fr 1fr;gap:1px;background:var(--line);border-radius:16px;overflow:hidden;margin:14px 0}
+.live-grid .cell{background:var(--card);padding:16px;text-align:center}
+.live-grid .cell .v{font-size:28px;font-weight:800;font-variant-numeric:tabular-nums;letter-spacing:-0.02em}
+.live-grid .cell .k{font-size:11px;color:var(--sub);margin-top:4px}
+.gpsdot{display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--mut);margin-right:5px}
+.gpsdot.ok{background:var(--ok);box-shadow:0 0 8px var(--ok)}
+.gpsdot.weak{background:var(--warn)}
+
+/* 하단 탭바 */
+nav.tabbar{position:fixed;bottom:0;left:0;right:0;z-index:40;display:flex;
+  padding:8px 8px calc(8px + env(safe-area-inset-bottom));gap:2px;
+  background:linear-gradient(0deg,rgba(11,15,20,.98),rgba(11,15,20,.86));backdrop-filter:blur(14px);
+  border-top:1px solid var(--line)}
+nav.tabbar button{flex:1;display:flex;flex-direction:column;align-items:center;gap:3px;padding:6px 2px;
+  border-radius:12px;color:var(--mut);font-size:10px;font-weight:600}
+nav.tabbar button .ic{font-size:20px;line-height:1}
+nav.tabbar button.active{color:var(--acc)}
+nav.tabbar button.run{position:relative}
+
+/* 모달 / 토스트 */
+.modal{position:fixed;inset:0;z-index:60;display:none;align-items:flex-end;justify-content:center;
+  background:rgba(0,0,0,.55);backdrop-filter:blur(3px)}
+.modal.open{display:flex}
+.sheet{width:100%;max-width:640px;background:var(--bg2);border-radius:22px 22px 0 0;border:1px solid var(--line);
+  border-bottom:none;padding:8px 16px calc(20px + env(safe-area-inset-bottom));max-height:88vh;overflow:auto}
+.sheet .grab{width:40px;height:4px;border-radius:3px;background:var(--line);margin:8px auto 12px}
+.sheet h3{font-size:16px;margin-bottom:4px}
+.toast{position:fixed;left:50%;bottom:calc(84px + env(safe-area-inset-bottom));transform:translateX(-50%);
+  background:var(--card2);border:1px solid var(--line);padding:11px 18px;border-radius:12px;font-size:13px;font-weight:600;
+  z-index:80;opacity:0;transition:opacity .25s,transform .25s;pointer-events:none;box-shadow:0 8px 24px rgba(0,0,0,.4)}
+.toast.show{opacity:1;transform:translateX(-50%) translateY(-4px)}
+
+/* 차트 */
+.chartbox{width:100%;overflow:hidden}
+canvas.chart{width:100%;height:150px;display:block}
+
+.empty{text-align:center;color:var(--sub);padding:26px 10px;font-size:13px;line-height:1.6}
+.empty .big{font-size:34px;margin-bottom:8px;opacity:.7}
+.note{font-size:11px;color:var(--mut);line-height:1.55;margin-top:8px}
+.pill{display:inline-block;padding:3px 8px;border-radius:8px;background:var(--bg2);border:1px solid var(--line);font-size:11px;color:var(--sub);margin:2px 3px 2px 0}
+.hr{height:1px;background:var(--line);margin:14px 0}
+.kv{display:flex;justify-content:space-between;font-size:13px;padding:7px 0;border-bottom:1px solid var(--line)}
+.kv:last-child{border-bottom:none}
+.kv .k{color:var(--sub)}
+.kv .v{font-weight:700}
+.riskbadge{padding:5px 10px;border-radius:10px;font-size:12px;font-weight:800}
+.badge-ok{background:rgba(57,217,138,.16);color:var(--ok)}
+.badge-warn{background:rgba(255,209,102,.16);color:var(--warn)}
+.badge-bad{background:rgba(255,93,108,.16);color:var(--bad)}
+</style>
+</head>
+<body>
+
+<header class="app">
+  <div class="logo">🏃</div>
+  <div>
+    <h1>런코치</h1>
+    <div class="sub" id="headerSub">마라톤 맞춤 훈련 코치</div>
+  </div>
+  <div class="spacer"></div>
+  <button class="iconbtn" id="btnSettings" title="설정">⚙️</button>
+</header>
+
+<main>
+  <!-- ================= 대시보드 ================= -->
+  <section class="page active" id="page-home">
+    <div class="grid2">
+      <div class="stat"><div class="k">이번 주 거리</div><div class="v" id="hWeekKm">0<small> km</small></div><div class="d" id="hWeekGoal">목표 대비 0%</div></div>
+      <div class="stat"><div class="k">최근 4주 평균/주</div><div class="v" id="hAvgKm">0<small> km</small></div><div class="d flat" id="hAvgTrend">—</div></div>
+    </div>
+    <div class="grid2">
+      <div class="stat"><div class="k">추정 체력(VDOT)</div><div class="v" id="hVdot">—</div><div class="d flat" id="hRacePred">기록 첨부 필요</div></div>
+      <div class="stat"><div class="k">부상 위험(ACWR)</div><div class="v" id="hAcwr">—</div><div class="d" id="hAcwrLbl">—</div></div>
+    </div>
+
+    <div class="card">
+      <h2>오늘의 훈련</h2>
+      <div id="todayWorkout"><div class="empty"><div class="big">📅</div>아직 플랜이 없어요.<br>기록을 첨부하고 주간 플랜을 생성하세요.</div></div>
+    </div>
+
+    <div class="card">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+        <h2>주간 거리 추이</h2><span class="pill" id="weeklyRange">최근 8주</span>
+      </div>
+      <div class="chartbox"><canvas class="chart" id="chartWeekly" height="150"></canvas></div>
+    </div>
+
+    <button class="btn primary block" onclick="go('run')">▶︎ 러닝 시작</button>
+  </section>
+
+  <!-- ================= 훈련 플랜 ================= -->
+  <section class="page" id="page-plan">
+    <div class="card">
+      <div style="display:flex;justify-content:space-between;align-items:center">
+        <div><h2 id="planWeekTitle">이번 주 훈련 플랜</h2><div class="desc" id="planWeekMeta" style="margin:4px 0 0">플랜을 생성해 보세요</div></div>
+        <div class="row" style="gap:6px"><button class="btn sm" id="btnNsmGuide">📘 NSM</button><button class="btn primary sm" id="btnGenPlan">🤖 생성</button></div>
+      </div>
+    </div>
+    <div id="planList"></div>
+    <div class="card tight">
+      <div class="row" style="gap:8px">
+        <button class="btn ghost sm" id="btnPrevWeek">‹ 이전 주</button>
+        <div style="flex:1"></div>
+        <button class="btn ghost sm" id="btnNextWeek">다음 주 ›</button>
+      </div>
+    </div>
+    <div class="note">플랜은 첨부·기록된 데이터의 최근 부하(급성/만성)와 추정 레이스 페이스(VDOT)를 바탕으로 자동 계산됩니다. <b>NSM(노르웨이식 싱글)</b>을 주축으로, 역치 바로 아래(서브스레숄드)에서 3·6·10분 반복을 주 2회 배치하고 LSD·이지·리커버리로 채웁니다. 점진적 과부하 10% 룰과 ACWR 안전구간을 지켜 반복 가능한 훈련을 쌓도록 설계했습니다. (Strava/Garmin/Zepp 코치 주기화 원칙 참고)</div>
+  </section>
+
+  <!-- ================= 기록 ================= -->
+  <section class="page" id="page-records">
+    <div class="card">
+      <h2>러닝 기록 첨부 & 학습</h2>
+      <div class="desc">스크린샷(이미지)·txt·GPX/TCX 파일 또는 직접 입력으로 기록을 추가하면, 앱이 이를 분석해 체력과 플랜에 반영합니다.</div>
+      <div class="grid2">
+        <button class="btn" id="btnAddFile">📎 파일 첨부</button>
+        <button class="btn" id="btnAddManual">✏️ 직접 입력</button>
+      </div>
+      <input type="file" id="fileInput" accept="image/*,.txt,.csv,.gpx,.tcx" multiple class="hidden" />
+      <button class="btn block" id="btnOcrAll" style="margin-top:10px">🔍 첨부 이미지에서 수치 자동 인식</button>
+      <div class="note">이미지/텍스트에서 거리·시간·페이스·심박·케이던스를 자동 추출합니다. 애플 피트니스·Strava·Garmin 스크린샷을 인식하며, 첫 실행 시 인식 엔진을 잠시 내려받습니다. 파일은 기기 내부(IndexedDB)에만 저장됩니다.</div>
+    </div>
+    <div style="display:flex;justify-content:space-between;align-items:center;margin:4px 2px 10px">
+      <div class="sectitle" style="margin:0">기록 목록 <span id="recCount" style="color:var(--acc)"></span></div>
+      <select id="recFilter" style="width:auto;padding:6px 10px;font-size:12px">
+        <option value="all">전체</option>
+        <option value="lsd">LSD</option><option value="tempo">템포</option>
+        <option value="interval">인터벌</option><option value="nsm">NSM</option>
+        <option value="recovery">리커버리</option><option value="easy">이지</option>
+      </select>
+    </div>
+    <div id="recList"></div>
+  </section>
+
+  <!-- ================= 실시간 러닝 ================= -->
+  <section class="page" id="page-run">
+    <div class="card">
+      <div style="display:flex;justify-content:space-between;align-items:center">
+        <div><span class="gpsdot" id="gpsDot"></span><span id="gpsText" style="font-size:12px;color:var(--sub)">GPS 대기중</span></div>
+        <select id="runType" style="width:auto;padding:6px 10px;font-size:12px">
+          <option value="easy">이지런</option><option value="lsd">LSD</option>
+          <option value="tempo">템포</option><option value="interval">인터벌</option>
+          <option value="nsm">NSM</option><option value="recovery">리커버리</option>
+        </select>
+      </div>
+
+      <div class="live-main">
+        <div class="pace"><span id="livePace">--:--</span> <small>/km</small></div>
+        <div class="lbl">현재 페이스</div>
+      </div>
+
+      <div class="live-grid">
+        <div class="cell"><div class="v" id="liveTime">00:00</div><div class="k">경과 시간</div></div>
+        <div class="cell"><div class="v" id="liveDist">0.00</div><div class="k">거리 (km)</div></div>
+        <div class="cell"><div class="v" id="liveCad">--</div><div class="k">케이던스 (spm)</div></div>
+        <div class="cell"><div class="v" id="liveAvg">--:--</div><div class="k">평균 페이스</div></div>
+      </div>
+
+      <div id="runShoeWrap">
+        <label class="f">착용 러닝화</label>
+        <select id="runShoe"></select>
+      </div>
+
+      <div class="row" style="margin-top:14px">
+        <button class="btn primary block" id="btnRunStart">▶︎ 시작</button>
+        <button class="btn block hidden" id="btnRunPause">⏸ 일시정지</button>
+        <button class="btn danger block hidden" id="btnRunStop">■ 종료 &amp; 저장</button>
+      </div>
+      <div class="note" id="watchNote"></div>
+    </div>
+  </section>
+
+  <!-- ================= 러닝화 ================= -->
+  <section class="page" id="page-shoes">
+    <div class="card">
+      <div style="display:flex;justify-content:space-between;align-items:center">
+        <div><h2>러닝화 마일리지</h2><div class="desc" style="margin:4px 0 0">신발별 누적 거리를 관리하고 교체 시점을 알려드려요.</div></div>
+        <button class="btn primary sm" id="btnAddShoe">+ 추가</button>
+      </div>
+    </div>
+    <div id="shoeList"></div>
+  </section>
+
+  <!-- ================= 분석 ================= -->
+  <section class="page" id="page-analysis">
+    <div class="card">
+      <h2>훈련 데이터 심층 분석</h2>
+      <div class="desc">부하 관리, 페이스 추세, 훈련 강도 분포, 예측 기록을 분석합니다.</div>
+    </div>
+
+    <div class="card">
+      <h2 style="margin-bottom:12px">강도 분포 (폴라라이즈드)</h2>
+      <div class="chartbox"><canvas class="chart" id="chartZone" height="150"></canvas></div>
+      <div id="zoneLegend" style="margin-top:10px"></div>
+      <div class="note">엘리트 러너는 저강도(이지/LSD) 약 80%, 고강도(템포/인터벌) 약 20%의 폴라라이즈드 훈련을 합니다.</div>
+    </div>
+
+    <div class="card">
+      <h2 style="margin-bottom:12px">페이스 추세 (이지런 기준)</h2>
+      <div class="chartbox"><canvas class="chart" id="chartPace" height="150"></canvas></div>
+    </div>
+
+    <div class="card">
+      <h2 style="margin-bottom:12px">종합 리포트</h2>
+      <div id="reportBox"></div>
+    </div>
+
+    <div class="card">
+      <h2 style="margin-bottom:10px">데이터 & 저장공간</h2>
+      <div id="storageBox"></div>
+      <div class="row" style="margin-top:12px">
+        <button class="btn sm" id="btnExport">⬇︎ 백업(JSON)</button>
+        <button class="btn sm" id="btnImport">⬆︎ 복원</button>
+        <button class="btn sm danger" id="btnWipe">전체 삭제</button>
+      </div>
+      <input type="file" id="importInput" accept=".json" class="hidden" />
+    </div>
+  </section>
+</main>
+
+<nav class="tabbar">
+  <button data-tab="home" class="active"><span class="ic">🏠</span>홈</button>
+  <button data-tab="plan"><span class="ic">📋</span>플랜</button>
+  <button data-tab="run" class="run"><span class="ic">🏃</span>러닝</button>
+  <button data-tab="records"><span class="ic">📎</span>기록</button>
+  <button data-tab="analysis"><span class="ic">📊</span>분석</button>
+</nav>
+
+<!-- 러닝화 탭은 설정/기록에서 접근. 별도 버튼으로도 -->
+<div class="modal" id="modal">
+  <div class="sheet" id="sheet"><div class="grab"></div><div id="sheetBody"></div></div>
+</div>
+<div class="toast" id="toast"></div>
+
+<script src="app.js"></script>
+</body>
+</html>
