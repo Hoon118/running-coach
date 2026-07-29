@@ -554,26 +554,53 @@ function mergeImageGroup(group){
   return rec;
 }
 
-/* 새 이미지(요약/스플릿)를 이미 저장된 기록과 거리·시간으로 매칭할 대상 찾기
-   - 스플릿 이미지 → 스플릿이 아직 없는 '요약' 기록을 찾음
-   - 요약 이미지   → 요약이 아직 없는 '스플릿' 기록을 찾음
-   (imgKind가 'both'거나 없는 기록은 병합 대상 아님 → 서로 다른 러닝끼리 안 합쳐짐) */
+/* 요약↔스플릿 매칭 비용: 여러 신호(거리·시간·구간수·페이스)를 종합.
+   - 명백히 다른 러닝이면 Infinity (거리 1.2km↑ 또는 시간 2분↑ 차이)
+   - 최소 2개 신호가 일치해야 매칭 확정(오매칭 방지)
+   - sp=스플릿쪽 프로필, sm=요약쪽 프로필 */
+function matchCost(sp, sm){
+  let votes=0; const err=[]; let hard=0;
+  if(sp.dist!=null && sm.dist!=null){
+    const d=Math.abs(sp.dist-sm.dist);
+    if(d>1.2) hard++; else { err.push(d/Math.max(sm.dist,1)); if(d<=0.4) votes++; }
+  }
+  if(sp.time!=null && sm.time!=null){
+    const d=Math.abs(sp.time-sm.time);
+    if(d>120) hard++; else { err.push(d/Math.max(sm.time,1)); if(d<=40) votes++; }
+  }
+  if(sp.rows && sm.dist!=null){                 // 구간 수 ≈ ceil(거리)
+    if(Math.abs(sp.rows-Math.ceil(sm.dist))<=1) votes++;
+    else if(Math.abs(sp.rows-Math.ceil(sm.dist))>=3) hard++;
+  }
+  if(sp.pace!=null && sm.pace!=null){
+    const d=Math.abs(sp.pace-sm.pace);
+    if(d<=20) votes++; err.push(Math.min(d,120)/240);
+    if(d>90) hard++;
+  }
+  if(hard>=1) return Infinity;
+  if(votes<2) return Infinity;
+  return err.length ? err.reduce((a,b)=>a+b,0)/err.length : 0.4;
+}
+function itemProfile(it){
+  return { dist:it.p.distanceKm, time:it.p.durationSec, pace:it.p.avgPaceSec,
+           rows: it.isSplit ? (it.splits?it.splits.length:0) : 0, isSplit: it.isSplit };
+}
+function recProfile(r){
+  return { dist:r.distanceKm, time:r.durationSec, pace:r.avgPaceSec,
+           rows: (r.splits?r.splits.length:0) };
+}
+/* 새 이미지를 이미 저장된 상호보완 기록(요약↔스플릿)과 매칭 (엄격) */
 function findMergeTarget(item){
   const need = item.isSplit ? 'summary' : 'splits';
-  const d=item.p.distanceKm, t=item.p.durationSec;
-  let best=null, bestScore=Infinity;
+  const prof = itemProfile(item);
+  let best=null, bestC=Infinity;
   for(const ex of state.records){
     if(ex.source!=='image' || ex.imgKind!==need) continue;
-    const ed=ex.distanceKm, et=ex.durationSec;
-    const dOk = d&&ed ? Math.abs(d-ed)<=0.6 : false;   // 거리 ±0.6km
-    const tOk = t&&et ? Math.abs(t-et)<=90 : false;    // 시간 ±90초
-    if(!(dOk||tOk)) continue;
-    const ds=(d&&ed)?Math.abs(d-ed)/Math.max(ed,1):1;
-    const ts=(t&&et)?Math.abs(t-et)/Math.max(et,1):1;
-    const score=(d&&ed&&t&&et)?(ds+ts)/2:Math.min(ds,ts);
-    if(score<bestScore){bestScore=score;best=ex;}
+    const ep = recProfile(ex);
+    const c = item.isSplit ? matchCost(prof, ep) : matchCost(ep, prof);
+    if(c<bestC){ bestC=c; best=ex; }
   }
-  return best;
+  return isFinite(bestC) ? best : null;
 }
 
 /* 기존 기록에 이미지 한 장을 추가하고 수치를 합침 */
@@ -650,25 +677,63 @@ async function handleFiles(files){
         p.avgPaceSec = tot.avgPaceSec;
         if(p.avgHr==null) p.avgHr = tot.avgHr;
         if(p.cadence==null) p.cadence = tot.cadence;
+      } else if(!hasHMS && /스\s*플\s*릿|킬로\s*미터|split/i.test(text||'') && p.distanceKm!=null && p.distanceKm<=1.6){
+        // 스플릿 화면인데 행 파싱 실패: '1.00킬로미터' 라벨을 총거리로 오인하지 않도록 제거
+        p.distanceKm = null;
       }
       items.push({ dataUrl, fileName:f.name, text, p, iso:parseDateFromText(text||''),
                    splits: isSplit ? splits : null, isSplit });
     }
-    // 요약 먼저 처리 → 그 다음 스플릿이 (이번 배치 or 기존 기록의) 요약을 찾아 붙도록
-    const ordered = [...items.filter(it=>!it.isSplit), ...items.filter(it=>it.isSplit)];
+    const summaryItems = items.filter(it=>!it.isSplit);
+    const splitItems   = items.filter(it=>it.isSplit);
     let recCount = 0, mergedCount = 0;
-    for(const item of ordered){
-      const ex = findMergeTarget(item);
-      if(ex){                                   // 거리·시간 맞는 짝 발견 → 같은 기록에 사진 추가
-        await attachImageToRecord(ex, item);
-        mergedCount++;
-      } else {                                  // 짝 없음 → 새 기록
-        const rec = mergeImageGroup([item]); const imgs = rec._images; delete rec._images;
-        rec.imgKind = item.isSplit ? 'splits' : 'summary';
-        await DB.put('records', rec);
-        await DB.put('files', { id:rec.id, dataUrl:imgs[0] });
-        state.records.push(rec); recCount++; added++;
-      }
+
+    const createSingle = async (item)=>{
+      const rec = mergeImageGroup([item]); const imgs = rec._images; delete rec._images;
+      rec.imgKind = item.isSplit ? 'splits' : 'summary';
+      await DB.put('records', rec);
+      await DB.put('files', { id:rec.id, dataUrl:imgs[0] });
+      state.records.push(rec); recCount++; added++;
+    };
+
+    // 1) 배치 내부 전역 최적 매칭: 모든 (스플릿,요약) 쌍의 비용을 구해 가장 잘 맞는 쌍부터 확정
+    const pairs=[];
+    splitItems.forEach((sp,si)=> summaryItems.forEach((sm,mi)=>{
+      const c = matchCost(itemProfile(sp), itemProfile(sm));
+      if(isFinite(c)) pairs.push({c,si,mi});
+    }));
+    pairs.sort((a,b)=>a.c-b.c);
+    const usedS=new Set(), pairForM={};
+    for(const pr of pairs){
+      if(usedS.has(pr.si) || pairForM[pr.mi]!=null) continue;
+      usedS.add(pr.si); pairForM[pr.mi]=pr.si;
+    }
+
+    // 2) 매칭된 요약+스플릿 → 사진 두 장이 든 한 기록
+    for(let mi=0; mi<summaryItems.length; mi++){
+      if(pairForM[mi]==null) continue;
+      const sm=summaryItems[mi], sp=splitItems[pairForM[mi]];
+      const rec = mergeImageGroup([sm, sp]); const imgs = rec._images; delete rec._images;
+      rec.imgKind='both';
+      await DB.put('records', rec);
+      await DB.put('files', { id:rec.id, dataUrl:imgs[0] });
+      for(let i=1;i<imgs.length;i++) await DB.put('files', { id:rec.id+'#'+i, dataUrl:imgs[i] });
+      state.records.push(rec); recCount++; added++; mergedCount++;
+    }
+
+    // 3) 남은 요약 → 기존 스플릿-only 기록과 엄격 매칭, 아니면 단독
+    for(let mi=0; mi<summaryItems.length; mi++){
+      if(pairForM[mi]!=null) continue;
+      const sm=summaryItems[mi]; const ex=findMergeTarget(sm);
+      if(ex){ await attachImageToRecord(ex, sm); mergedCount++; }
+      else await createSingle(sm);
+    }
+    // 4) 남은 스플릿 → 기존 요약 기록과 엄격 매칭, 아니면 단독
+    for(let si=0; si<splitItems.length; si++){
+      if(usedS.has(si)) continue;
+      const sp=splitItems[si]; const ex=findMergeTarget(sp);
+      if(ex){ await attachImageToRecord(ex, sp); mergedCount++; }
+      else await createSingle(sp);
     }
     state.records.sort((a,b)=>new Date(b.date)-new Date(a.date));
     recompute();                 // 전체 데이터로 훈련 존/학습치 계산
