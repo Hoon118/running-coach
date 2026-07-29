@@ -545,8 +545,9 @@ function mergeImageGroup(group){
   const iso = group.map(g=>g.iso).find(Boolean) || new Date().toISOString();
   const splitsItem = group.find(g=>g.splits && g.splits.length>=2);
   const splits = splitsItem ? splitsItem.splits : null;
+  const mtime = group.map(g=>g.mtime).find(v=>v!=null) || null;
   const rec = { id:uid(), date:iso, source:'image', fileName:primary.fileName||'', notes:'',
-    hasImage:true, distanceKm, durationSec, avgPaceSec, avgHr, cadence, splits, autoType:true,
+    hasImage:true, distanceKm, durationSec, avgPaceSec, avgHr, cadence, splits, autoType:true, mtime,
     type: classifyRun({distanceKm, durationSec, avgPaceSec, avgHr, hint:(primary.text||'')+' '+(primary.fileName||'')}),
     needsReview: !distanceKm, imageCount: group.length,
     ocrText: (primary.text||'').slice(0,400) };
@@ -554,43 +555,57 @@ function mergeImageGroup(group){
   return rec;
 }
 
-/* 요약↔스플릿 매칭 비용: 여러 신호(거리·시간·구간수·페이스)를 종합.
-   - 명백히 다른 러닝이면 Infinity (거리 1.2km↑ 또는 시간 2분↑ 차이)
-   - 최소 2개 신호가 일치해야 매칭 확정(오매칭 방지)
+/* 요약↔스플릿 매칭 비용: 거리·시간·페이스·구간수·심박을 연속 점수로 종합.
+   - 각 신호의 상대 오차를 스케일로 정규화해 합산(작을수록 잘 맞음)
+   - 2개 이상 신호가 '강하게' 불일치하면 서로 다른 러닝 → Infinity
    - sp=스플릿쪽 프로필, sm=요약쪽 프로필 */
 function matchCost(sp, sm){
-  let votes=0; const err=[]; let hard=0;
-  if(sp.dist!=null && sm.dist!=null){
-    const d=Math.abs(sp.dist-sm.dist);
-    if(d>1.2) hard++; else { err.push(d/Math.max(sm.dist,1)); if(d<=0.4) votes++; }
-  }
-  if(sp.time!=null && sm.time!=null){
-    const d=Math.abs(sp.time-sm.time);
-    if(d>120) hard++; else { err.push(d/Math.max(sm.time,1)); if(d<=40) votes++; }
-  }
-  if(sp.rows && sm.dist!=null){                 // 구간 수 ≈ ceil(거리)
-    if(Math.abs(sp.rows-Math.ceil(sm.dist))<=1) votes++;
-    else if(Math.abs(sp.rows-Math.ceil(sm.dist))>=3) hard++;
-  }
-  if(sp.pace!=null && sm.pace!=null){
-    const d=Math.abs(sp.pace-sm.pace);
-    if(d<=20) votes++; err.push(Math.min(d,120)/240);
-    if(d>90) hard++;
-  }
-  if(hard>=1) return Infinity;
-  if(votes<2) return Infinity;
-  return err.length ? err.reduce((a,b)=>a+b,0)/err.length : 0.4;
+  const terms=[]; let strong=0;
+  const add=(diff, scale, hardX)=>{ terms.push(Math.min(diff/scale, 3)); if(diff > scale*hardX) strong++; };
+  if(sp.dist!=null && sm.dist!=null) add(Math.abs(sp.dist-sm.dist), 0.5, 3);   // 0.5km, 강불일치 >1.5km
+  if(sp.time!=null && sm.time!=null) add(Math.abs(sp.time-sm.time), 45, 3);    // 45s,   강불일치 >135s
+  if(sp.pace!=null && sm.pace!=null) add(Math.abs(sp.pace-sm.pace), 25, 3);    // 25s/km,강불일치 >75
+  if(sp.rows && sm.dist!=null)       add(Math.abs(sp.rows-Math.ceil(sm.dist)), 1, 3); // 구간수, 강불일치 >3
+  if(sp.hr!=null && sm.hr!=null)     add(Math.abs(sp.hr-sm.hr), 6, 4);         // 6bpm,  강불일치 >24
+  if(strong>=2) return Infinity;                 // 다른 러닝
+  // 촬영 시각 근접(같은 러닝의 요약·스플릿은 보통 몇 분 내 촬영) → 소프트 보너스(강불일치 없음)
+  if(sp.mtime && sm.mtime) terms.push(Math.min(Math.abs(sp.mtime-sm.mtime)/60000/5, 2)); // 5분 스케일
+  if(!terms.length) return 50;                   // 데이터 없음 → 약한 매칭(최후)
+  return terms.reduce((a,b)=>a+b,0)/terms.length;
 }
 function itemProfile(it){
-  return { dist:it.p.distanceKm, time:it.p.durationSec, pace:it.p.avgPaceSec,
-           rows: it.isSplit ? (it.splits?it.splits.length:0) : 0, isSplit: it.isSplit };
+  return { dist:it.p.distanceKm, time:it.p.durationSec, pace:it.p.avgPaceSec, hr:it.p.avgHr,
+           rows: it.isSplit ? (it.splits?it.splits.length:0) : 0, isSplit: it.isSplit, mtime: it.mtime };
 }
 function recProfile(r){
-  return { dist:r.distanceKm, time:r.durationSec, pace:r.avgPaceSec,
-           rows: (r.splits?r.splits.length:0) };
+  return { dist:r.distanceKm, time:r.durationSec, pace:r.avgPaceSec, hr:r.avgHr,
+           rows: (r.splits?r.splits.length:0), mtime: r.mtime };
 }
-/* 새 이미지를 이미 저장된 상호보완 기록(요약↔스플릿)과 매칭 (엄격) */
-function findMergeTarget(item){
+/* 헝가리안 알고리즘: n×n 비용행렬의 최소비용 완전 매칭. res[i]=배정된 열 j */
+function hungarian(cost){
+  const n=cost.length; if(!n) return [];
+  const u=Array(n+1).fill(0), v=Array(n+1).fill(0), p=Array(n+1).fill(0), way=Array(n+1).fill(0);
+  for(let i=1;i<=n;i++){
+    p[0]=i; let j0=0;
+    const minv=Array(n+1).fill(Infinity), used=Array(n+1).fill(false);
+    do{
+      used[j0]=true; const i0=p[j0]; let delta=Infinity, j1=-1;
+      for(let j=1;j<=n;j++) if(!used[j]){
+        const cur=cost[i0-1][j-1]-u[i0]-v[j];
+        if(cur<minv[j]){ minv[j]=cur; way[j]=j0; }
+        if(minv[j]<delta){ delta=minv[j]; j1=j; }
+      }
+      for(let j=0;j<=n;j++){ if(used[j]){ u[p[j]]+=delta; v[j]-=delta; } else minv[j]-=delta; }
+      j0=j1;
+    } while(p[j0]!==0);
+    do{ const j1=way[j0]; p[j0]=p[j1]; j0=j1; } while(j0);
+  }
+  const res=Array(n).fill(-1);
+  for(let j=1;j<=n;j++) if(p[j]>0) res[p[j]-1]=j-1;
+  return res;
+}
+/* 새 이미지를 이미 저장된 상호보완 기록(요약↔스플릿)과 매칭 (엄격 임계값) */
+function findMergeTarget(item, maxCost){
   const need = item.isSplit ? 'summary' : 'splits';
   const prof = itemProfile(item);
   let best=null, bestC=Infinity;
@@ -600,7 +615,7 @@ function findMergeTarget(item){
     const c = item.isSplit ? matchCost(prof, ep) : matchCost(ep, prof);
     if(c<bestC){ bestC=c; best=ex; }
   }
-  return isFinite(bestC) ? best : null;
+  return (bestC <= (maxCost!=null?maxCost:2.0)) ? best : null;
 }
 
 /* 기존 기록에 이미지 한 장을 추가하고 수치를 합침 */
@@ -682,7 +697,7 @@ async function handleFiles(files){
         p.distanceKm = null;
       }
       items.push({ dataUrl, fileName:f.name, text, p, iso:parseDateFromText(text||''),
-                   splits: isSplit ? splits : null, isSplit });
+                   splits: isSplit ? splits : null, isSplit, mtime: f.lastModified||null });
     }
     const summaryItems = items.filter(it=>!it.isSplit);
     const splitItems   = items.filter(it=>it.isSplit);
@@ -696,17 +711,22 @@ async function handleFiles(files){
       state.records.push(rec); recCount++; added++;
     };
 
-    // 1) 배치 내부 전역 최적 매칭: 모든 (스플릿,요약) 쌍의 비용을 구해 가장 잘 맞는 쌍부터 확정
-    const pairs=[];
-    splitItems.forEach((sp,si)=> summaryItems.forEach((sm,mi)=>{
-      const c = matchCost(itemProfile(sp), itemProfile(sm));
-      if(isFinite(c)) pairs.push({c,si,mi});
-    }));
-    pairs.sort((a,b)=>a.c-b.c);
+    // 1) 배치 내부 전역 최적 매칭(헝가리안): 전체 비용이 최소가 되도록 스플릿↔요약을 짝지음
+    const nS=splitItems.length, nM=summaryItems.length, K=Math.max(nS,nM);
     const usedS=new Set(), pairForM={};
-    for(const pr of pairs){
-      if(usedS.has(pr.si) || pairForM[pr.mi]!=null) continue;
-      usedS.add(pr.si); pairForM[pr.mi]=pr.si;
+    if(K>0){
+      const FORBID=1e5, DUMMY=1e6;
+      const cost=Array.from({length:K},()=>Array(K).fill(DUMMY)); // 더미(짝 없음) = 아주 큰 값
+      for(let i=0;i<nS;i++) for(let j=0;j<nM;j++){
+        const c=matchCost(itemProfile(splitItems[i]), itemProfile(summaryItems[j]));
+        cost[i][j] = isFinite(c) ? c : FORBID;   // 다른 러닝(강불일치)은 금지 비용
+      }
+      const assign=hungarian(cost);
+      const ACCEPT=4.0;                            // 실제 신호 비용(0~3대)은 수용, FORBID/DUMMY는 거부
+      for(let i=0;i<nS;i++){
+        const j=assign[i];
+        if(j>=0 && j<nM && cost[i][j] < ACCEPT){ usedS.add(i); pairForM[j]=i; }
+      }
     }
 
     // 2) 매칭된 요약+스플릿 → 사진 두 장이 든 한 기록
