@@ -439,33 +439,88 @@ async function fileToRecord(file){
   return base;
 }
 
-async function handleFiles(files){
-  let added = 0;
-  const imgRecs = [];
-  for(const f of files){
-    const rec = await fileToRecord(f);
-    await DB.put('records', rec);
-    state.records.push(rec);
-    added++;
-    if(rec.hasImage && (rec.distanceKm==null || rec.avgPaceSec==null)) imgRecs.push(rec);
-  }
-  state.records.sort((a,b)=>new Date(b.date)-new Date(a.date));
-  recompute(); renderRecords();
-  toast(`${added}개 기록 추가`);
+function fileToDataUrl(file){
+  return new Promise(r=>{ const fr=new FileReader(); fr.onload=()=>r(fr.result); fr.readAsDataURL(file); });
+}
+function median(arr){
+  const a = arr.filter(x=>x!=null).sort((x,y)=>x-y); if(!a.length) return null;
+  const n=a.length; return n%2? a[(n-1)/2] : Math.round((a[n/2-1]+a[n/2])/2);
+}
+/* 같은 러닝의 여러 스크린샷(요약+스플릿 등)을 하나의 기록으로 병합 */
+function mergeImageGroup(group){
+  const withBoth = group.find(g=>g.p.distanceKm && g.p.durationSec);
+  const primary = withBoth || group.find(g=>g.p.distanceKm) || group[0];
+  const ps = group.map(g=>g.p);
+  const dists = ps.map(p=>p.distanceKm).filter(v=>v!=null);
+  const durs  = ps.map(p=>p.durationSec).filter(v=>v!=null);
+  const distanceKm  = dists.length? Math.max(...dists) : null; // 총거리 = 최댓값
+  const durationSec = durs.length?  Math.max(...durs)  : null; // 총시간 = 최댓값
+  const pick = (f)=> primary.p[f]!=null ? primary.p[f] : median(ps.map(p=>p[f])); // 요약값 우선
+  let avgPaceSec = pick('avgPaceSec');
+  const avgHr = pick('avgHr'), cadence = pick('cadence');
+  if(distanceKm && durationSec && !avgPaceSec) avgPaceSec = durationSec/distanceKm;
+  const iso = group.map(g=>g.iso).find(Boolean) || new Date().toISOString();
+  const rec = { id:uid(), date:iso, source:'image', fileName:primary.fileName||'', notes:'',
+    hasImage:true, distanceKm, durationSec, avgPaceSec, avgHr, cadence,
+    type: guessType(primary.fileName||'', distanceKm, avgPaceSec),
+    needsReview: !distanceKm, imageCount: group.length,
+    ocrText: (primary.text||'').slice(0,400) };
+  rec._images = [primary.dataUrl, ...group.filter(g=>g!==primary).map(g=>g.dataUrl)];
+  return rec;
+}
 
-  // 이미지 첨부 시 자동 OCR
-  if(imgRecs.length){
-    toast('이미지에서 수치 자동 인식 중…');
-    let ok = 0;
-    for(let i=0;i<imgRecs.length;i++){
-      toast(`이미지 인식 중… ${i+1}/${imgRecs.length}`);
-      try{ if(await applyOcrToRecord(imgRecs[i])) ok++; }catch(e){}
-      state.records.sort((a,b)=>new Date(b.date)-new Date(a.date));
-      recompute(); renderRecords();
+async function handleFiles(files){
+  const arr = Array.from(files);
+  const images = arr.filter(f=> (f.type||'').startsWith('image/'));
+  const others = arr.filter(f=> !(f.type||'').startsWith('image/'));
+  let added = 0;
+
+  // 1) 비이미지(GPX/TCX/TXT): 기존 개별 처리
+  for(const f of others){
+    const rec = await fileToRecord(f);
+    await DB.put('records', rec); state.records.push(rec); added++;
+  }
+  if(others.length){ state.records.sort((a,b)=>new Date(b.date)-new Date(a.date)); recompute(); renderRecords(); }
+
+  // 2) 이미지: OCR → 날짜별 그룹 → 같은 러닝 자동 병합
+  if(images.length){
+    toast(`이미지 인식 준비 중… (${images.length}장, 첫 실행은 다소 걸려요)`);
+    let ocrReady = true;
+    try{ await ensureOCR(); }catch(e){ ocrReady=false; toast('인식 엔진 로드 실패 · 이미지는 저장하고 수동 보정으로 진행'); }
+    const items = [];
+    for(let i=0;i<images.length;i++){
+      toast(`이미지 인식 중… ${i+1}/${images.length}`);
+      const f = images[i]; const dataUrl = await fileToDataUrl(f);
+      let text = '';
+      if(ocrReady){ try{ text = await ocrImage(dataUrl); }catch(e){} }
+      items.push({ dataUrl, fileName:f.name, text, p:parseTextMetrics(text||f.name||''), iso:parseDateFromText(text||'') });
     }
-    toast(ok? `${ok}개 이미지 수치 자동 반영 ✓` : '자동 인식 실패 · 탭하여 직접 보정');
-    const still = state.records.find(r=>r.needsReview || (r.hasImage&&!r.distanceKm));
-    if(still && !ok) editRecord(still.id);
+    // 날짜별 그룹핑 (날짜 없으면 개별)
+    const groups = new Map(); let solo = 0;
+    items.forEach(it=>{ const key = it.iso? ('d'+isoDay(it.iso)) : ('s'+(solo++));
+      if(!groups.has(key)) groups.set(key,[]); groups.get(key).push(it); });
+
+    let recCount = 0, mergedCount = 0;
+    for(const [,group] of groups){
+      // 같은 날 '완전한 요약'이 2개 이상이고 거리차가 크면 → 서로 다른 러닝: 병합하지 않음
+      const summaries = group.filter(g=>g.p.distanceKm && g.p.durationSec);
+      const sd = summaries.map(g=>g.p.distanceKm);
+      const separate = summaries.length>=2 && (Math.max(...sd)-Math.min(...sd) > 0.8);
+      const subGroups = separate ? group.map(g=>[g]) : [group];
+      for(const sub of subGroups){
+        const rec = mergeImageGroup(sub); const imgs = rec._images; delete rec._images;
+        await DB.put('records', rec);
+        await DB.put('files', { id:rec.id, dataUrl:imgs[0] });
+        for(let i=1;i<imgs.length;i++) await DB.put('files', { id:rec.id+'#'+i, dataUrl:imgs[i] });
+        state.records.push(rec); recCount++; added++;
+        if(sub.length>1) mergedCount++;
+      }
+    }
+    state.records.sort((a,b)=>new Date(b.date)-new Date(a.date));
+    recompute(); renderRecords();
+    toast(`정리 완료 · ${recCount}개 기록${mergedCount?` (같은 러닝 ${mergedCount}건 자동 병합)`:''}`);
+  } else if(added){
+    toast(`${added}개 기록 추가`);
   }
 }
 
@@ -657,12 +712,18 @@ function openRecordReport(id){
     </div>`);
   $('#rr_edit').onclick = ()=> editRecord(id);
   $('#rr_del').onclick = ()=> deleteRecord(id);
-  if(r.hasImage){ DB.get('files', r.id).then(f=>{ if(f&&$('#rr_thumb')) $('#rr_thumb').innerHTML=`<img src="${f.dataUrl}" style="width:100%;border-radius:12px;max-height:260px;object-fit:cover">`; }); }
+  if(r.hasImage){ (async ()=>{
+    const keys=[r.id]; for(let i=1;i<(r.imageCount||1);i++) keys.push(r.id+'#'+i);
+    const imgs=[]; for(const k of keys){ const f=await DB.get('files',k); if(f) imgs.push(f.dataUrl); }
+    const box=$('#rr_thumb'); if(box&&imgs.length) box.innerHTML = imgs.map(u=>`<img src="${u}" style="width:100%;border-radius:12px;margin-bottom:8px;display:block">`).join('');
+  })(); }
 }
 
 async function deleteRecord(id){
+  const rec = state.records.find(r=>r.id===id);
   await DB.del('records', id);
   await DB.del('files', id).catch(()=>{});
+  if(rec && rec.imageCount>1){ for(let i=1;i<rec.imageCount;i++) await DB.del('files', id+'#'+i).catch(()=>{}); }
   state.records = state.records.filter(r=>r.id!==id);
   recompute(); renderRecords(); closeSheet(); toast('삭제됨');
 }
@@ -675,7 +736,9 @@ async function renderRecords(){
   if(!list.length){ box.innerHTML = `<div class="empty"><div class="big">📎</div>기록이 없습니다.<br>파일을 첨부하거나 직접 입력해 주세요.</div>`; return; }
   const rows = await Promise.all(list.map(async r=>{
     let thumb = `<div class="thumb">${TYPES[r.type]?.label?.[0]||'🏃'}</div>`;
-    if(r.hasImage){ const f = await DB.get('files', r.id); if(f) thumb = `<div class="thumb"><img src="${f.dataUrl}"></div>`; }
+    if(r.hasImage){ const f = await DB.get('files', r.id);
+      const badge = (r.imageCount>1)? `<span style="position:absolute;right:3px;bottom:3px;background:rgba(0,0,0,.65);color:#fff;font-size:9px;font-weight:700;padding:1px 5px;border-radius:8px">📷${r.imageCount}</span>` : '';
+      if(f) thumb = `<div class="thumb" style="position:relative"><img src="${f.dataUrl}">${badge}</div>`; }
     const t = TYPES[r.type]||TYPES.easy;
     const meta = [
       r.distanceKm!=null?`${r.distanceKm.toFixed(2)}km`:null,
