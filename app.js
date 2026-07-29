@@ -881,7 +881,51 @@ async function deleteRecord(id){
   recompute(); renderRecords(); closeSheet(); toast('삭제됨');
 }
 
+/* 기록 탭 상단 · 데이터로 학습된 내 상태 프로필 */
+function renderAthleteProfile(){
+  const card=$('#profileCard'); if(!card) return;
+  const m=state.metrics;
+  if(!m || !m.count){ card.style.display='none'; return; }
+  card.style.display='';
+
+  // 학습 수준(기록 수 기반)
+  const lv = m.count>=20?['숙련 프로필','badge-ok']: m.count>=8?['학습 중','badge-ok']:['초기 학습','badge-warn'];
+  $('#profileLevel').innerHTML = `<span class="riskbadge ${lv[1]}" style="font-size:11px">${lv[0]} · ${m.count}회</span>`;
+
+  const kv=(k,v,sub)=>`<div class="kv"><span class="k">${k}</span><span class="v">${v}${sub?` <span class="k" style="font-size:11px">${sub}</span>`:''}</span></div>`;
+  const hz=m.hr||{};
+  const rows=[];
+
+  // 심박
+  rows.push(kv('추정 최대심박', `${m.maxHR} bpm`, m.learnedMaxHR&&!state.settings.maxHRManual?'자동 학습':(state.settings.maxHRManual?'직접 설정':'')));
+  if(hz.easy)     rows.push(kv('이지런 심박존', `${hz.easy[0]}–${hz.easy[1]} bpm`, '유산소 65–70%'));
+  if(hz.recovery) rows.push(kv('회복 심박존', `${hz.recovery[0]}–${hz.recovery[1]} bpm`, '60–65%'));
+  if(m.easyHrLearned)      rows.push(kv('실측 이지 평균심박', `${m.easyHrLearned} bpm`, '내 이지런 기록 기반'));
+  if(m.thresholdHrLearned) rows.push(kv('실측 템포 평균심박', `${m.thresholdHrLearned} bpm`, '역치 근처'));
+
+  // 페이스/체력
+  if(m.easyPaceLearned) rows.push(kv('내 이지 페이스', `${fmtPace(m.easyPaceLearned)}/km`, '실측 학습'));
+  if(m.vdot)  rows.push(kv('현재 체력(VDOT)', `${m.vdot}`, m.pace5k?`5K ${fmtPace(m.pace5k)}/km`:''));
+  if(m.vdot)  rows.push(kv('예상 기록', `10K ${fmtDuration(m.racePred['10k'])} · 풀 ${fmtDuration(m.racePred['full'])}`));
+  if(m.cadenceAvg) rows.push(kv('평균 케이던스', `${m.cadenceAvg} spm`));
+
+  // 부하 상태
+  const a=m.acwr;
+  if(a){ const st=a<0.8?['부하 낮음','var(--acc2)']:a<=1.3?['최적 ✓','var(--ok)']:a<=1.5?['주의','var(--acc2)']:['위험','var(--bad)'];
+    rows.push(kv('훈련 부하(ACWR)', `<span style="color:${st[1]};font-weight:700">${a.toFixed(2)} · ${st[0]}</span>`, `주 ${m.chronicWeekly.toFixed(0)}km`)); }
+
+  // 코멘트
+  const notes=[];
+  if(m.effTrend>0) notes.push(`📈 유산소 효율이 좋아지고 있어요 (같은 심박에 km당 약 ${m.effTrend}회 낮아짐).`);
+  else if(m.effTrend<0) notes.push('최근 이지런 심박이 다소 높아요. 회복/수면을 점검해 보세요.');
+  if(m.learnedMaxHR && !state.settings.maxHRManual) notes.push('최대심박은 기록이 쌓일수록 더 정확해집니다(설정에서 직접 지정 가능).');
+
+  $('#profileBody').innerHTML = rows.join('')
+    + (notes.length?`<div class="hr"></div>`+notes.map(n=>`<div class="note" style="font-size:12px;color:var(--txt)">${n}</div>`).join(''):'');
+}
+
 async function renderRecords(){
+  renderAthleteProfile();
   const filter = $('#recFilter').value;
   const list = state.records.filter(r=> filter==='all' || r.type===filter);
   $('#recCount').textContent = state.records.length ? `(${state.records.length})` : '';
@@ -987,9 +1031,36 @@ function recompute(){
       nsm3R:n3, nsm6R:n6, nsm10R:n10
     };
   }
+  // ── 학습: 최대심박 자동 추정 (스플릿 구간 심박 / 고강도 평균심박 기반) ──
+  const splitHRs = [], splitCads = [];
+  recs.forEach(r=>{ if(Array.isArray(r.splits)) r.splits.forEach(s=>{ if(s.hr) splitHRs.push(s.hr); if(s.cad) splitCads.push(s.cad); }); });
+  const highAvgHr = recs.filter(r=>['interval','nsm','tempo','race'].includes(r.type)&&r.avgHr).map(r=>r.avgHr);
+  let learnedMaxHR = null;
+  if(splitHRs.length) learnedMaxHR = Math.max(...splitHRs) + 2;          // 구간 최고심박은 실제 최대의 하한 → +2 보정
+  else if(highAvgHr.length) learnedMaxHR = Math.round(Math.max(...highAvgHr)/0.94); // 고강도 평균 ≈ 최대의 94%
+  if(learnedMaxHR) learnedMaxHR = Math.min(215, Math.max(150, learnedMaxHR));
+  // 사용자가 설정에서 직접 지정하지 않았으면 학습값을 자동 반영
+  if(learnedMaxHR && !state.settings.maxHRManual && state.settings.maxHR !== learnedMaxHR){
+    state.settings.maxHR = learnedMaxHR;
+    try{ localStorage.setItem('rc_settings', JSON.stringify(state.settings)); }catch(e){}
+  }
   // 심박 존
   const maxHR = state.settings.maxHR || 190;
   const hr = NSM.hrZones(maxHR);
+
+  // ── 학습: 실제 데이터로 본 이지/역치 심박·페이스, 케이던스, 유산소 효율 추세 ──
+  const easyRuns = recs.filter(r=>['easy','recovery','lsd'].includes(r.type));
+  const easyHrLearned = median(easyRuns.filter(r=>r.avgHr).map(r=>r.avgHr));
+  const easyPaceLearned = median(easyRuns.filter(r=>r.avgPaceSec).map(r=>r.avgPaceSec));
+  const thresholdHrLearned = median(recs.filter(r=>r.type==='tempo'&&r.avgHr).map(r=>r.avgHr));
+  const cadenceAvg = median([...splitCads, ...recs.filter(r=>r.cadence).map(r=>r.cadence)]);
+  // 유산소 효율(같은 심박 대비 속도): 이지런 km당 심박수 추세 (낮아질수록 개선)
+  const effSeries = easyRuns.filter(r=>r.avgHr&&r.avgPaceSec&&r.distanceKm&&r.durationSec)
+    .sort((a,b)=>new Date(a.date)-new Date(b.date))
+    .map(r=> r.avgHr*(r.durationSec/60)/r.distanceKm);
+  let effTrend = null;
+  if(effSeries.length>=4){ const h=effSeries.length>>1, av=a=>a.reduce((s,x)=>s+x,0)/a.length;
+    effTrend = Math.round(av(effSeries.slice(0,h)) - av(effSeries.slice(h))); } // >0 개선
 
   // 주간 훈련시간(시간) 추정 — 최근 28일 기록 시간 기반, 없으면 거리×페이스
   let weekMin28 = 0;
@@ -1015,7 +1086,8 @@ function recompute(){
 
   state.metrics = { km7, km28, chronicWeekly, acwr, weeks, vdot, pace5k, racePred, racePace,
                     zones, zoneDist, zTot, paceTrend, count:recs.length,
-                    tenKSec, weeklyHours, hr, maxHR };
+                    tenKSec, weeklyHours, hr, maxHR,
+                    learnedMaxHR, easyHrLearned, easyPaceLearned, thresholdHrLearned, cadenceAvg, effTrend };
 }
 
 /* ============================================================
@@ -1705,11 +1777,11 @@ $('#btnSettings').onclick = ()=>{
     <input type="date" id="set_race_date" value="${s.raceDate||''}">
     <div class="inline">
       <div><label class="f">주간 목표 거리 (km)</label><input type="number" id="set_goal" value="${s.weeklyGoalKm}"></div>
-      <div><label class="f">최대심박 (bpm)</label><input type="number" id="set_maxhr" value="${s.maxHR||190}"></div>
+      <div><label class="f">최대심박 (bpm)${(!s.maxHRManual && state.metrics && state.metrics.learnedMaxHR)?' <span style="color:var(--ok);font-size:11px">· 자동 학습됨</span>':''}</label><input type="number" id="set_maxhr" value="${s.maxHR||190}"></div>
     </div>
     <label class="f">체중 (kg)</label>
     <input type="number" id="set_wt" value="${s.weightKg}">
-    <div class="note">최대심박은 이지런/롱런 심박 상한(60~70%) 계산에 쓰입니다. 모르면 대략 220-나이로 넣어도 됩니다.</div>
+    <div class="note">최대심박은 이지런/롱런 심박 상한(60~70%) 계산에 쓰입니다. <b>기록(특히 스플릿·고강도 세션)이 쌓이면 자동으로 학습·갱신</b>됩니다. 값을 직접 바꿔 저장하면 자동 학습이 멈추고, 학습값과 같게 두면 자동 학습이 유지됩니다.</div>
     <div class="hr"></div>
     <button class="btn block" id="set_shoes">👟 러닝화 관리</button>
     <div style="height:10px"></div>
@@ -1721,7 +1793,10 @@ $('#btnSettings').onclick = ()=>{
     state.settings.targetRace=$('#set_race').value;
     state.settings.weeklyGoalKm=parseInt($('#set_goal').value)||40;
     state.settings.weightKg=parseInt($('#set_wt').value)||65;
-    state.settings.maxHR=parseInt($('#set_maxhr').value)||190;
+    const enteredMax=parseInt($('#set_maxhr').value)||190;
+    const learned=state.metrics&&state.metrics.learnedMaxHR;
+    state.settings.maxHRManual = !(learned && enteredMax===learned); // 학습값과 다르면 수동(자동 학습 중단)
+    state.settings.maxHR=enteredMax;
     state.settings.raceDate=$('#set_race_date').value||'';
     localStorage.setItem('rc_settings',JSON.stringify(state.settings));
     recompute(); closeSheet(); renderHome(); toast('설정 저장됨');
