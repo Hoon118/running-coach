@@ -600,7 +600,7 @@ function mergeImageGroup(group){
    sp=스플릿쪽 프로필, sm=요약쪽 프로필 */
 function matchCost(sp, sm){
   // ── 하드 게이트: 같은 러닝이라면 반드시 통과해야 하는 조건 ──
-  if(sp.dist!=null && sm.dist!=null && Math.abs(sp.dist-sm.dist) > 0.7) return Infinity;         // 거리 0.7km↑ 차 → 다른 러닝
+  if(sp.dist!=null && sm.dist!=null && Math.abs(sp.dist-sm.dist) > 0.5) return Infinity;         // 거리 0.5km↑ 차 → 다른 러닝
   if(sp.time!=null && sm.time!=null && Math.abs(sp.time-sm.time) > 75)  return Infinity;         // 총시간 75초↑ 차
   if(sp.rows   && sm.dist!=null && Math.abs(sp.rows-Math.ceil(sm.dist)) > 2) return Infinity;    // 구간 수 ≠ 거리
   if(sp.pace!=null && sm.pace!=null && Math.abs(sp.pace-sm.pace) > 45)  return Infinity;         // 평균 페이스 45초/km↑ 차
@@ -775,13 +775,15 @@ async function handleFiles(files){
       state.records.push(rec); recCount++; added++;
     };
 
-    // ── PASS 1 (고신뢰): 촬영 시각 클러스터에서 '요약1+스플릿1'은 OCR이 강하게 반박하지 않으면 바로 짝 ──
+    // ── PASS 1: 촬영 시각 클러스터에서 '요약1+스플릿1'이고 '거리·시간 검증(엄격)'도 통과하면 짝 ──
+    // (시각이 가까워도 OCR이 다른 러닝이라 하면 묶지 않음 → 엄한 것끼리 묶임 방지)
     const used = new Set();       // 이미 짝지어진 item
-    const groups = [];            // 최종 [요약,스플릿] 또는 [단독] 그룹
-    for(const cl of clusterByTime(items, 60000)){    // 60초 이내 연속 촬영 = 같은 세션
+    const groups = [];            // 최종 [요약,스플릿] 그룹
+    for(const cl of clusterByTime(items, 60000)){    // 60초 이내 연속 촬영 = 같은 세션 후보
       const sums = cl.filter(it=>!it.isSplit), sps = cl.filter(it=>it.isSplit);
-      if(sums.length===1 && sps.length===1 && !contradicts(itemProfile(sps[0]), itemProfile(sums[0]))){
-        groups.push([sums[0], sps[0]]); used.add(sums[0]); used.add(sps[0]);
+      if(sums.length===1 && sps.length===1){
+        const c = matchCost(itemProfile(sps[0]), itemProfile(sums[0]));
+        if(isFinite(c) && c < 2.5){ groups.push([sums[0], sps[0]]); used.add(sums[0]); used.add(sps[0]); }
       }
     }
 
