@@ -719,6 +719,26 @@ async function reclassifyAllAuto(){
   return changed;
 }
 
+/* 이미지 1장 → OCR + 파싱 → 매칭용 item 객체 (첨부/분리 재인식에 공용) */
+async function buildImageItem(dataUrl, fileName, mtime, ocrReady){
+  let text = '';
+  if(ocrReady!==false){ try{ text = await ocrImage(dataUrl); }catch(e){} }
+  const p = parseTextMetrics(text||fileName||'');
+  const splits = parseSplits(text||'');
+  // 스플릿 '전용' 화면 판별: 구간표 2행↑ + 총시간(h:mm:ss) 없음
+  const hasHMS = /\d{1,2}:\d{2}:\d{2}/.test(text||'');
+  const isSplit = splits.length>=2 && !hasHMS;
+  if(isSplit){
+    const tot = splitsTotals(splits);
+    p.distanceKm = tot.distanceKm; p.durationSec = tot.durationSec; p.avgPaceSec = tot.avgPaceSec;
+    if(p.avgHr==null) p.avgHr = tot.avgHr; if(p.cadence==null) p.cadence = tot.cadence;
+  } else if(!hasHMS && /스\s*플\s*릿|킬로\s*미터|split/i.test(text||'') && p.distanceKm!=null && p.distanceKm<=1.6){
+    p.distanceKm = null; // 파싱 실패한 스플릿 화면의 '1.00킬로미터' 라벨 오인 방지
+  }
+  return { dataUrl, fileName:fileName||'', text, p, iso:parseDateFromText(text||''),
+           splits: isSplit ? splits : null, isSplit, mtime: mtime||null };
+}
+
 async function handleFiles(files){
   const arr = Array.from(files);
   const images = arr.filter(f=> (f.type||'').startsWith('image/'));
@@ -741,29 +761,7 @@ async function handleFiles(files){
     for(let i=0;i<images.length;i++){
       toast(`이미지 인식 중… ${i+1}/${images.length}`);
       const f = images[i]; const dataUrl = await fileToDataUrl(f);
-      let text = '';
-      if(ocrReady){ try{ text = await ocrImage(dataUrl); }catch(e){} }
-      const p = parseTextMetrics(text||f.name||'');
-      const splits = parseSplits(text||'');
-      // 스플릿 '전용' 화면 판별: 구간표가 2행 이상 + 총시간(h:mm:ss)이 없음
-      // (요약 화면은 '0:39:11' 같은 총시간이 있어 스플릿 미리보기가 조금 보여도 요약으로 취급)
-      const hasHMS = /\d{1,2}:\d{2}:\d{2}/.test(text||'');
-      const isSplit = splits.length>=2 && !hasHMS;
-      if(isSplit){
-        // 스플릿 화면엔 총거리/시간 표기가 없고 '1.00킬로미터' 같은 구간 라벨만 있음
-        // → 잘못 읽힌 총거리 대신 구간 합계를 총합으로 신뢰
-        const tot = splitsTotals(splits);
-        p.distanceKm = tot.distanceKm;
-        p.durationSec = tot.durationSec;
-        p.avgPaceSec = tot.avgPaceSec;
-        if(p.avgHr==null) p.avgHr = tot.avgHr;
-        if(p.cadence==null) p.cadence = tot.cadence;
-      } else if(!hasHMS && /스\s*플\s*릿|킬로\s*미터|split/i.test(text||'') && p.distanceKm!=null && p.distanceKm<=1.6){
-        // 스플릿 화면인데 행 파싱 실패: '1.00킬로미터' 라벨을 총거리로 오인하지 않도록 제거
-        p.distanceKm = null;
-      }
-      items.push({ dataUrl, fileName:f.name, text, p, iso:parseDateFromText(text||''),
-                   splits: isSplit ? splits : null, isSplit, mtime: f.lastModified||null });
+      items.push(await buildImageItem(dataUrl, f.name, f.lastModified, ocrReady));
     }
     const summaryItems = items.filter(it=>!it.isSplit);
     const splitItems   = items.filter(it=>it.isSplit);
@@ -1078,11 +1076,13 @@ function openRecordReport(id){
       <button class="btn" id="rr_edit">✏️ 편집</button>
       <button class="btn primary block" id="rr_close">확인</button>
     </div>
-    <button class="btn block" id="rr_merge" style="margin-top:8px">🔗 다른 기록과 합치기(사진 모으기)</button>`);
+    <button class="btn block" id="rr_merge" style="margin-top:8px">🔗 다른 기록과 합치기(사진 모으기)</button>
+    ${(r.imageCount>1)?'<button class="btn block" id="rr_split" style="margin-top:6px">✂️ 사진 분리(잘못 합쳐진 사진 떼기)</button>':''}`);
   $('#rr_edit').onclick = ()=> editRecord(id);
   $('#rr_del').onclick = ()=> deleteRecord(id);
   $('#rr_close').onclick = ()=> closeSheet();
   $('#rr_merge').onclick = ()=> openMergePicker(id);
+  if($('#rr_split')) $('#rr_split').onclick = ()=> openSplitPicker(id);
   if(r.hasImage){ (async ()=>{
     const keys=[r.id]; for(let i=1;i<(r.imageCount||1);i++) keys.push(r.id+'#'+i);
     const imgs=[]; for(const k of keys){ const f=await DB.get('files',k); if(f) imgs.push(f.dataUrl); }
@@ -1158,6 +1158,61 @@ async function mergeTwoRecords(baseId, otherId){
   renderRecords();
   toast('합쳤어요 · 사진과 데이터가 한 기록으로');
   openRecordReport(baseId);
+}
+
+/* 사진 분리: 여러 장이 든 기록에서 사진을 골라 개별 기록으로 떼어냄 */
+async function openSplitPicker(id){
+  const rec = state.records.find(r=>r.id===id);
+  if(!rec || !(rec.imageCount>1)){ toast('분리할 사진이 없어요'); return; }
+  const keys=[id]; for(let i=1;i<rec.imageCount;i++) keys.push(id+'#'+i);
+  const urls=[]; for(const k of keys){ const f=await DB.get('files',k); urls.push(f?f.dataUrl:null); }
+  const cards = urls.map((u,i)=> u?`<div style="margin-bottom:12px">
+      <img src="${u}" style="width:100%;border-radius:12px;display:block;margin-bottom:6px">
+      <button class="btn block" data-sep="${i}">이 사진을 개별 기록으로 분리</button></div>`:'').join('');
+  openSheet(`<h3 style="margin-top:0">사진 분리</h3>
+    <div class="note" style="margin-bottom:10px">잘못 합쳐진 사진을 골라 개별 기록으로 떼어냅니다. 떼어낸 사진과 남은 기록 모두 다시 인식해 수치를 갱신합니다.</div>
+    ${cards}
+    <button class="btn block" id="sp_cancel" style="margin-top:4px">취소</button>`);
+  document.querySelectorAll('[data-sep]').forEach(b=> b.onclick = ()=> separateImage(id, +b.dataset.sep));
+  $('#sp_cancel').onclick = ()=> openRecordReport(id);
+}
+
+async function separateImage(recId, idx){
+  const rec = state.records.find(r=>r.id===recId);
+  if(!rec || !(rec.imageCount>1)) return;
+  const keys=[recId]; for(let i=1;i<rec.imageCount;i++) keys.push(recId+'#'+i);
+  const urls=[]; for(const k of keys){ const f=await DB.get('files',k); urls.push(f?f.dataUrl:null); }
+  if(idx<0 || idx>=urls.length || !urls[idx]) return;
+  closeSheet(); toast('사진 분리 중… 재인식');
+  await ensureOCR().catch(()=>{});
+
+  // 1) 떼어낸 사진 → 새 개별 기록 (재인식)
+  const sepItem = await buildImageItem(urls[idx], rec.fileName||'', rec.mtime||null);
+  const nrec = mergeImageGroup([sepItem]); const nimgs = nrec._images; delete nrec._images;
+  nrec.imgKind = sepItem.isSplit ? 'splits' : 'summary';
+  await DB.put('records', nrec);
+  await DB.put('files', { id:nrec.id, dataUrl:nimgs[0] });
+  state.records.push(nrec);
+
+  // 2) 남은 사진으로 원본 재구성 (기존 파일 정리 후 재기록)
+  const remain = urls.filter((u,i)=> i!==idx && u);
+  for(const k of keys) await DB.del('files', k).catch(()=>{});
+  const remItems=[]; for(const u of remain) remItems.push(await buildImageItem(u, rec.fileName||'', rec.mtime||null));
+  const rebuilt = mergeImageGroup(remItems); const rimgs = rebuilt._images; delete rebuilt._images;
+  rebuilt.id = recId;                       // 원본 id/메모 유지
+  rebuilt.notes = rec.notes || '';
+  rebuilt.imgKind = remItems.length>1 ? 'both' : (remItems[0].isSplit ? 'splits' : 'summary');
+  if(rec.autoType===false){ rebuilt.type = rec.type; rebuilt.autoType = false; } // 수동 지정 종류 유지
+  await DB.put('records', rebuilt);
+  await DB.put('files', { id:recId, dataUrl:rimgs[0] });
+  for(let i=1;i<rimgs.length;i++) await DB.put('files', { id:recId+'#'+i, dataUrl:rimgs[i] });
+  const ix = state.records.findIndex(r=>r.id===recId); if(ix>=0) state.records[ix]=rebuilt;
+
+  recompute(); await reclassifyAllAuto(); recompute();
+  state.records.sort((a,b)=>new Date(b.date)-new Date(a.date));
+  renderRecords();
+  toast('사진을 분리했어요');
+  openRecordReport(recId);
 }
 
 async function deleteRecord(id){
