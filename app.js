@@ -372,8 +372,12 @@ function parseSplits(text){
 }
 /* 스플릿에서 총합 역산 */
 function splitsTotals(sp){
-  const durationSec = sp.reduce((s,x)=>s+x.tSec,0);
-  const distanceKm = +sp.reduce((s,x)=>s+x.km,0).toFixed(2);
+  const n = sp.length;
+  const durationSec = sp.reduce((s,x)=>s+x.tSec,0);        // 총시간 = 구간 시간 합(견고)
+  // 애플 스플릿은 각 구간=정확히 1.00km, 마지막만 부분 → 페이스 OCR 오류에 안 흔들리게 계산
+  const last = sp[n-1];
+  const lastFrac = (last && last.pace) ? Math.min(1.0, Math.max(0.05, last.tSec/last.pace)) : 1.0;
+  const distanceKm = +((n-1) + lastFrac).toFixed(2);
   const avgPaceSec = distanceKm? Math.round(durationSec/distanceKm) : null;
   const wavg = (f)=>{ const r=sp.filter(x=>x[f]!=null); if(!r.length) return null;
     const w=r.reduce((s,x)=>s+x.tSec,0); return w? Math.round(r.reduce((s,x)=>s+x[f]*x.tSec,0)/w):null; };
@@ -1069,15 +1073,25 @@ function openRecordReport(id){
 /* 수동 합치기: 대상 기록 목록을 보여주고 선택하면 두 기록을 하나로 병합 */
 function openMergePicker(id){
   const base = state.records.find(r=>r.id===id); if(!base) return;
-  const others = state.records.filter(r=>r.id!==id && r.source==='image')
-    .sort((a,b)=>new Date(b.date)-new Date(a.date));
-  if(!others.length){ toast('합칠 다른 사진 기록이 없어요'); return; }
-  const rows = others.map(r=>{
+  // 매칭 비용 기준으로 정렬 → 가장 그럴듯한 짝을 맨 위에 '추천'으로
+  const baseSplit = base.splits && base.splits.length>=2;
+  const bp = recProfile(base);
+  const scored = state.records.filter(r=>r.id!==id && r.source==='image').map(r=>{
+    const rp = recProfile(r); const rSplit = r.splits && r.splits.length>=2;
+    // 한쪽이 스플릿, 다른쪽이 요약일 때만 비용 계산(그 외는 거리만 참고)
+    let c = Infinity;
+    if(baseSplit !== rSplit){ c = baseSplit ? matchCost(bp, rp) : matchCost(rp, bp); }
+    else if(base.distanceKm!=null && r.distanceKm!=null){ c = 100 + Math.abs(base.distanceKm-r.distanceKm); }
+    return { r, c };
+  }).sort((a,b)=> a.c - b.c || new Date(b.r.date)-new Date(a.r.date));
+  if(!scored.length){ toast('합칠 다른 사진 기록이 없어요'); return; }
+  const rows = scored.map(({r,c},i)=>{
     const t=TYPES[r.type]||TYPES.easy;
     const meta=[r.distanceKm!=null?r.distanceKm.toFixed(2)+'km':'', r.durationSec?fmtDuration(r.durationSec):'',
                 r.splits&&r.splits.length>=2?'스플릿':(r.imageCount>1?'사진'+r.imageCount:'요약')].filter(Boolean).join(' · ');
+    const rec = (i===0 && isFinite(c) && c<3) ? '<span style="color:var(--ok);font-weight:700">· 추천</span>' : '';
     return `<button class="btn block" data-mid="${r.id}" style="text-align:left;margin-bottom:6px">
-      <span class="tag ${t.css}" style="margin-right:6px">${t.label}</span>${fmtDate(r.date)}
+      <span class="tag ${t.css}" style="margin-right:6px">${t.label}</span>${fmtDate(r.date)} ${rec}
       <span style="color:var(--sub);font-size:12px"> · ${meta}</span></button>`;
   }).join('');
   openSheet(`<h3 style="margin-top:0">이 기록에 합칠 기록 선택</h3>
