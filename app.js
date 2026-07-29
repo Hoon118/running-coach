@@ -536,6 +536,130 @@ function editRecord(id){
   if(id) $('#e_del').onclick = ()=> deleteRecord(id);
 }
 
+/* ── 개별 기록 상세 분석 리포트 ── */
+function openRecordReport(id){
+  const r = state.records.find(x=>x.id===id); if(!r) return;
+  const m = state.metrics || {};
+  const t = TYPES[r.type] || TYPES.easy;
+  const dist=r.distanceKm, dur=r.durationSec, pace=r.avgPaceSec, hr=r.avgHr, cad=r.cadence;
+
+  // 수치가 거의 없는 경우
+  if(dist==null && pace==null && hr==null){
+    openSheet(`
+      <h3>${fmtDate(r.date)} · ${t.label}</h3>
+      <div class="empty" style="padding:18px 6px">이 기록엔 분석할 수치가 없어요.<br>${r.hasImage?'아래 버튼으로 이미지에서 인식하거나 ':''}직접 보정해 주세요.</div>
+      <div class="row" style="margin-top:4px">
+        ${r.hasImage?'<button class="btn block" id="rr_ocr">🔍 이미지에서 인식</button>':''}
+        <button class="btn primary block" id="rr_edit">✏️ 직접 입력</button>
+      </div>`);
+    $('#rr_edit').onclick = ()=> editRecord(id);
+    if(r.hasImage){ const b=$('#rr_ocr'); if(b) b.onclick=async ()=>{ b.textContent='인식 중…'; b.disabled=true; try{ await applyOcrToRecord(r); }catch(e){} state.records.sort((a,b)=>new Date(b.date)-new Date(a.date)); recompute(); renderRecords(); openRecordReport(id); }; }
+    return;
+  }
+
+  const wt = state.settings.weightKg||65;
+  const maxHR = state.settings.maxHR||190;
+  const speedKmh = (dist&&dur)? dist/(dur/3600) : null;
+  const kcal = dist? Math.round(dist*wt*1.036) : null;
+  let stride=null; if(dist&&dur&&cad){ const steps=cad*(dur/60); if(steps>0) stride=(dist*1000)/steps; }
+  let beatsPerKm=null; if(dist&&dur&&hr) beatsPerKm=Math.round(hr*(dur/60)/dist);
+  let hrPct=null, hrZone=null;
+  if(hr){ hrPct=Math.round(hr/maxHR*100);
+    hrZone = hrPct<60?['Z1 매우 가벼움','#4aa8ff']:hrPct<70?['Z2 이지·유산소','#39d98a']:hrPct<80?['Z3 템포','#ffb03d']:hrPct<90?['Z4 역치','#ff8a3d']:['Z5 최대','#ff5d6c'];
+  }
+  // 페이스가 가장 가까운 훈련 존
+  let paceZone=null;
+  if(pace && m.zones){ const z=m.zones;
+    const cand=[['회복',z.recovery],['이지',z.easy],['마라톤',z.marathon],['NSM(서브T)',z.nsm],['템포(역치)',z.tempo],['인터벌(5K)',z.interval]];
+    let bd=1e9; cand.forEach(([n,v])=>{ if(v){const d=Math.abs(pace-v); if(d<bd){bd=d;paceZone=n;}} });
+  }
+  // 이 기록 기반 레이스 예측
+  let pred=null;
+  if(dist>=1.5 && dur){ const t5k=dur*Math.pow(5/dist,1.06); const pr=k=>t5k*Math.pow(k/5,1.06);
+    pred={ k5:pr(5), k10:pr(10), half:pr(21.0975), full:pr(42.195) }; }
+  // 동일 종류 평균 대비
+  const sameP=state.records.filter(x=>x.type===r.type&&x.avgPaceSec&&x.id!==r.id);
+  let paceCmp=null; if(pace&&sameP.length){ const avg=sameP.reduce((s,x)=>s+x.avgPaceSec,0)/sameP.length; paceCmp={avg,diff:Math.round(pace-avg)}; }
+  const sameH=state.records.filter(x=>x.type===r.type&&x.avgHr&&x.id!==r.id);
+  let hrCmp=null; if(hr&&sameH.length){ const avg=Math.round(sameH.reduce((s,x)=>s+x.avgHr,0)/sameH.length); hrCmp={avg,diff:hr-avg}; }
+
+  const kv=(k,v)=>`<div class="kv"><span class="k">${k}</span><span class="v">${v}</span></div>`;
+  const sig=(n)=> n>0?`+${n}`:`${n}`;
+
+  // 기본 지표
+  let core = kv('거리', dist!=null?`${dist.toFixed(2)} km`:'-')
+    + kv('시간', dur?fmtDuration(dur):'-')
+    + kv('평균 페이스', pace?`${fmtPace(pace)}/km`:'-')
+    + kv('평균 속도', speedKmh?`${speedKmh.toFixed(1)} km/h`:'-')
+    + kv('평균 심박', hr?`♥ ${hr} bpm`:'-')
+    + kv('케이던스', cad?`${cad} spm`:'-')
+    + kv('추정 소모', kcal?`${kcal} kcal <span class="k" style="font-size:11px">(${wt}kg 기준)</span>`:'-');
+
+  // 강도 분석
+  let intensity='';
+  if(hrZone) intensity += kv('심박 강도', `<span class="riskbadge" style="background:${hrZone[1]}22;color:${hrZone[1]}">${hrZone[0]} · ${hrPct}%</span>`);
+  if(paceZone) intensity += kv('페이스 존', `<b>${paceZone}</b> 페이스대`);
+  if(!intensity) intensity = `<div class="note">최대심박(설정)과 페이스 존이 있으면 강도가 표시됩니다.</div>`;
+
+  // 러닝 폼 / 효율
+  let form='';
+  if(cad) form += kv('케이던스', `${cad} spm`);
+  if(stride) form += kv('추정 보폭', `${stride.toFixed(2)} m`);
+  if(beatsPerKm) form += kv('심박 효율', `${beatsPerKm} 회/km <span class="k" style="font-size:11px">(낮을수록 효율↑)</span>`);
+  if(!form) form = `<div class="note">거리·시간·케이던스가 있으면 보폭/효율이 계산됩니다.</div>`;
+
+  // 예측
+  let predHtml = pred
+    ? kv('예상 5K', fmtDuration(pred.k5)) + kv('예상 10K', fmtDuration(pred.k10)) + kv('예상 하프', fmtDuration(pred.half)) + kv('예상 풀', fmtDuration(pred.full))
+      + `<div class="note">이 기록 하나를 최대 노력으로 가정한 Riegel 환산치입니다(참고용).</div>`
+    : `<div class="note">거리 1.5km 이상 + 시간이 있으면 레이스 예측이 표시됩니다.</div>`;
+
+  // 평균 대비
+  let cmp='';
+  if(paceCmp) cmp += kv(`${t.label} 평균 페이스 대비`, `${fmtPace(paceCmp.avg)}/km 대비 <b style="color:${paceCmp.diff<0?'var(--ok)':'var(--acc2)'}">${sig(-paceCmp.diff)}초/km ${paceCmp.diff<0?'빠름':'느림'}</b>`);
+  if(hrCmp) cmp += kv(`${t.label} 평균 심박 대비`, `${hrCmp.avg}bpm 대비 <b>${sig(hrCmp.diff)}bpm</b>`);
+  if(!cmp) cmp = `<div class="note">같은 종류의 기록이 더 쌓이면 평균과 비교해 드려요.</div>`;
+
+  // 코치 피드백
+  const fb=[];
+  if(cad){ if(cad<170) fb.push('👣 케이던스가 낮습니다(권장 170~185). 보폭을 조금 줄이고 스텝을 빠르게 하면 부상 위험이 줄어요.'); else if(cad>=175) fb.push('👣 케이던스가 양호합니다(175+). 효율적인 스텝이에요.'); }
+  if(hrPct){
+    if(['easy','recovery','lsd'].includes(r.type)){
+      if(hrPct>=76) fb.push('🫀 이지/회복 목적인데 심박이 높습니다(Z3+). 페이스를 더 낮춰 유산소 위주로 달리세요.');
+      else fb.push('🫀 심박이 적정 구간(Z1~Z2)입니다. 좋은 이지런이에요.');
+    } else if(['interval','nsm','tempo'].includes(r.type)){
+      if(hrPct<78) fb.push('🔥 고강도 세션 치고 심박이 낮은 편입니다. 강도를 조금 더 올려도 좋아요.');
+      else fb.push('🔥 목표 강도에 잘 도달했습니다.');
+    }
+  }
+  if(stride && stride>1.4) fb.push('보폭이 다소 큽니다. 오버스트라이드는 무릎 부담을 키울 수 있어요.');
+  if(paceCmp && paceCmp.diff<-10) fb.push('👍 같은 종류 평균보다 확연히 빠릅니다. 컨디션이 좋았네요.');
+  if(!fb.length) fb.push('데이터가 더 쌓이면 개인화된 코칭이 정교해집니다.');
+
+  openSheet(`
+    <div style="display:flex;align-items:center;gap:8px;margin-bottom:2px">
+      <span class="tag ${t.css}">${t.label}</span>
+      <h3 style="margin:0">${fmtDate(r.date)}</h3>
+    </div>
+    <div style="font-size:26px;font-weight:800;margin:6px 0 2px">${dist!=null?dist.toFixed(2)+' km':'—'} <span style="font-size:15px;color:var(--sub);font-weight:600">${pace?fmtPace(pace)+'/km':''}</span></div>
+    ${r.hasImage?'<div id="rr_thumb" style="margin:8px 0"></div>':''}
+    <div class="sectitle">기본 지표</div>${core}
+    <div class="hr"></div><div class="sectitle">강도 분석</div>${intensity}
+    <div class="hr"></div><div class="sectitle">러닝 폼 · 효율</div>${form}
+    <div class="hr"></div><div class="sectitle">이 기록 기반 레이스 예측</div>${predHtml}
+    <div class="hr"></div><div class="sectitle">평균 대비</div>${cmp}
+    <div class="hr"></div><div class="sectitle">코치 피드백</div>
+    ${fb.map(x=>`<div class="note" style="font-size:12.5px;color:var(--txt);line-height:1.55">${x}</div>`).join('')}
+    ${r.notes?`<div class="hr"></div><div class="sectitle">메모</div><div class="note" style="color:var(--txt)">${r.notes}</div>`:''}
+    <div class="row" style="margin-top:16px">
+      <button class="btn danger" id="rr_del">삭제</button>
+      <button class="btn primary block" id="rr_edit">✏️ 편집</button>
+    </div>`);
+  $('#rr_edit').onclick = ()=> editRecord(id);
+  $('#rr_del').onclick = ()=> deleteRecord(id);
+  if(r.hasImage){ DB.get('files', r.id).then(f=>{ if(f&&$('#rr_thumb')) $('#rr_thumb').innerHTML=`<img src="${f.dataUrl}" style="width:100%;border-radius:12px;max-height:260px;object-fit:cover">`; }); }
+}
+
 async function deleteRecord(id){
   await DB.del('records', id);
   await DB.del('files', id).catch(()=>{});
@@ -559,7 +683,7 @@ async function renderRecords(){
       r.avgPaceSec?`${fmtPace(r.avgPaceSec)}/km`:null,
       r.avgHr?`♥${r.avgHr}`:null,
       r.cadence?`${r.cadence}spm`:null
-    ].filter(Boolean).join(' · ') || '수치 없음 (탭하여 보정)';
+    ].filter(Boolean).join(' · ') || '수치 없음 · 탭하여 분석/보정';
     return `<div class="rec" data-id="${r.id}">
       ${thumb}
       <div class="info">
@@ -572,7 +696,7 @@ async function renderRecords(){
   box.innerHTML = rows.join('');
   $$('.rec', box).forEach(el=> el.addEventListener('click', (e)=>{
     if(e.target.dataset.del){ deleteRecord(e.target.dataset.del); return; }
-    editRecord(el.dataset.id);
+    openRecordReport(el.dataset.id);
   }));
 }
 
