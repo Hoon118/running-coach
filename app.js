@@ -627,6 +627,25 @@ function recProfile(r){
   return { dist:r.distanceKm, time:r.durationSec, pace:r.avgPaceSec, hr:r.avgHr,
            rows: (r.splits?r.splits.length:0), mtime: r.mtime };
 }
+/* OCR이 '명백히 다른 러닝'이라고 반박하는가 (촬영시각 짝짓기용 — 시각 증거를 강하게 신뢰하므로 아주 느슨) */
+function contradicts(sp, sm){
+  if(sp.dist!=null && sm.dist!=null && Math.abs(sp.dist-sm.dist) > 1.5) return true;
+  if(sp.time!=null && sm.time!=null && Math.abs(sp.time-sm.time) > 180) return true;
+  if(sp.rows && sm.dist!=null && Math.abs(sp.rows-Math.ceil(sm.dist)) > 4) return true;
+  if(sp.pace!=null && sm.pace!=null && Math.abs(sp.pace-sm.pace) > 90) return true;
+  return false;
+}
+/* 촬영 시각(lastModified)으로 이미지 클러스터링: gap 이내 연속 촬영 = 같은 세션 */
+function clusterByTime(items, gapMs){
+  const withT = items.filter(it=>it.mtime).sort((a,b)=>a.mtime-b.mtime);
+  const clusters=[]; let cur=[];
+  for(const it of withT){
+    if(!cur.length || it.mtime - cur[cur.length-1].mtime <= gapMs) cur.push(it);
+    else { clusters.push(cur); cur=[it]; }
+  }
+  if(cur.length) clusters.push(cur);
+  return clusters;
+}
 /* 헝가리안 알고리즘: n×n 비용행렬의 최소비용 완전 매칭. res[i]=배정된 열 j */
 function hungarian(cost){
   const n=cost.length; if(!n) return [];
@@ -758,29 +777,37 @@ async function handleFiles(files){
       state.records.push(rec); recCount++; added++;
     };
 
-    // 1) 배치 내부 전역 최적 매칭(헝가리안): 전체 비용이 최소가 되도록 스플릿↔요약을 짝지음
-    const nS=splitItems.length, nM=summaryItems.length, K=Math.max(nS,nM);
-    const usedS=new Set(), pairForM={};
-    if(K>0){
-      const FORBID=1e5, DUMMY=1e6;
-      const cost=Array.from({length:K},()=>Array(K).fill(DUMMY)); // 더미(짝 없음) = 아주 큰 값
-      for(let i=0;i<nS;i++) for(let j=0;j<nM;j++){
-        const c=matchCost(itemProfile(splitItems[i]), itemProfile(summaryItems[j]));
-        cost[i][j] = isFinite(c) ? c : FORBID;   // 다른 러닝(강불일치)은 금지 비용
-      }
-      const assign=hungarian(cost);
-      const ACCEPT=2.5;                            // 하드게이트 통과한 실제 비용만 수용, FORBID/DUMMY 거부
-      for(let i=0;i<nS;i++){
-        const j=assign[i];
-        if(j>=0 && j<nM && cost[i][j] < ACCEPT){ usedS.add(i); pairForM[j]=i; }
+    // ── PASS 1 (고신뢰): 촬영 시각 클러스터에서 '요약1+스플릿1'은 OCR이 강하게 반박하지 않으면 바로 짝 ──
+    const used = new Set();       // 이미 짝지어진 item
+    const groups = [];            // 최종 [요약,스플릿] 또는 [단독] 그룹
+    for(const cl of clusterByTime(items, 60000)){    // 60초 이내 연속 촬영 = 같은 세션
+      const sums = cl.filter(it=>!it.isSplit), sps = cl.filter(it=>it.isSplit);
+      if(sums.length===1 && sps.length===1 && !contradicts(itemProfile(sps[0]), itemProfile(sums[0]))){
+        groups.push([sums[0], sps[0]]); used.add(sums[0]); used.add(sps[0]);
       }
     }
 
-    // 2) 매칭된 요약+스플릿 → 사진 두 장이 든 한 기록
-    for(let mi=0; mi<summaryItems.length; mi++){
-      if(pairForM[mi]==null) continue;
-      const sm=summaryItems[mi], sp=splitItems[pairForM[mi]];
-      const rec = mergeImageGroup([sm, sp]); const imgs = rec._images; delete rec._images;
+    // ── PASS 2: 남은 요약/스플릿을 OCR 헝가리안으로 전역 최적 매칭 ──
+    const rSum = summaryItems.filter(it=>!used.has(it));
+    const rSp  = splitItems.filter(it=>!used.has(it));
+    if(rSum.length && rSp.length){
+      const nS=rSp.length, nM=rSum.length, K=Math.max(nS,nM);
+      const FORBID=1e5, DUMMY=1e6;
+      const cost=Array.from({length:K},()=>Array(K).fill(DUMMY));
+      for(let i=0;i<nS;i++) for(let j=0;j<nM;j++){
+        const c=matchCost(itemProfile(rSp[i]), itemProfile(rSum[j]));
+        cost[i][j] = isFinite(c) ? c : FORBID;
+      }
+      const assign=hungarian(cost); const ACCEPT=2.5;
+      for(let i=0;i<nS;i++){
+        const j=assign[i];
+        if(j>=0 && j<nM && cost[i][j] < ACCEPT){ groups.push([rSum[j], rSp[i]]); used.add(rSp[i]); used.add(rSum[j]); }
+      }
+    }
+
+    // ── 짝 그룹 → 사진 두 장이 든 한 기록 생성 ──
+    for(const g of groups){
+      const rec = mergeImageGroup(g); const imgs = rec._images; delete rec._images;
       rec.imgKind='both';
       await DB.put('records', rec);
       await DB.put('files', { id:rec.id, dataUrl:imgs[0] });
@@ -788,19 +815,12 @@ async function handleFiles(files){
       state.records.push(rec); recCount++; added++; mergedCount++;
     }
 
-    // 3) 남은 요약 → 기존 스플릿-only 기록과 엄격 매칭, 아니면 단독
-    for(let mi=0; mi<summaryItems.length; mi++){
-      if(pairForM[mi]!=null) continue;
-      const sm=summaryItems[mi]; const ex=findMergeTarget(sm);
-      if(ex){ await attachImageToRecord(ex, sm); mergedCount++; }
-      else await createSingle(sm);
-    }
-    // 4) 남은 스플릿 → 기존 요약 기록과 엄격 매칭, 아니면 단독
-    for(let si=0; si<splitItems.length; si++){
-      if(usedS.has(si)) continue;
-      const sp=splitItems[si]; const ex=findMergeTarget(sp);
-      if(ex){ await attachImageToRecord(ex, sp); mergedCount++; }
-      else await createSingle(sp);
+    // ── 남은 단독 → 기존 상호보완 기록과 매칭 시도, 아니면 새 기록 ──
+    for(const it of items){
+      if(used.has(it)) continue;
+      const ex=findMergeTarget(it);
+      if(ex){ await attachImageToRecord(ex, it); mergedCount++; }
+      else await createSingle(it);
     }
     state.records.sort((a,b)=>new Date(b.date)-new Date(a.date));
     recompute();                 // 전체 데이터로 훈련 존/학습치 계산

@@ -1,5 +1,5 @@
 // 런코치 서비스 워커 - 오프라인 캐시 (앱 셸)
-const CACHE = 'runcoach-v11';
+const CACHE = 'runcoach-v12';
 const ASSETS = [
   './',
   './index.html',
