@@ -253,7 +253,7 @@ canvas.chart{width:100%;height:150px;display:block}
       </div>
       <input type="file" id="fileInput" accept="image/*,.txt,.csv,.gpx,.tcx" multiple class="hidden" />
       <button class="btn block" id="btnOcrAll" style="margin-top:10px">🔍 첨부 이미지에서 수치 자동 인식</button>
-      <div class="note">이미지/텍스트에서 거리·시간·페이스·심박·케이던스를 자동 추출합니다. 애플 피트니스·Strava·Garmin 스크린샷을 인식하며, 첫 실행 시 인식 엔진을 잠시 내려받습니다. 파일은 기기 내부(IndexedDB)에만 저장됩니다.</div>
+      <div class="note">이 버튼은 <b>수치가 비어 있는 이미지 기록</b>을 훑어, 스크린샷 속 글자를 읽어(OCR) 거리·시간·페이스·심박·케이던스·<b>날짜</b>를 자동으로 채웁니다. 애플 피트니스·Strava·Garmin 요약 화면 캡처를 인식하며, 첫 실행 때만 인식 엔진을 잠시 내려받습니다(20~40초). 인식이 애매하면 기록을 탭해 직접 보정하세요. 파일은 기기 내부(IndexedDB)에만 저장됩니다.</div>
     </div>
     <div style="display:flex;justify-content:space-between;align-items:center;margin:4px 2px 10px">
       <div class="sectitle" style="margin:0">기록 목록 <span id="recCount" style="color:var(--acc)"></span></div>

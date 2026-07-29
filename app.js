@@ -234,6 +234,16 @@ function go(tab){
 }
 $$('nav.tabbar button').forEach(b=> b.addEventListener('click', ()=>go(b.dataset.tab)) );
 
+/* 화면 크기/방향 변화 시 현재 탭 차트 다시 그리기 (유동적 리사이즈) */
+function redrawActiveCharts(){
+  const active = document.querySelector('.page.active'); if(!active) return;
+  if(active.id==='page-home') drawWeeklyChart();
+  else if(active.id==='page-analysis') renderAnalysis();
+}
+let _rzTimer;
+window.addEventListener('resize', ()=>{ clearTimeout(_rzTimer); _rzTimer=setTimeout(redrawActiveCharts,150); });
+window.addEventListener('orientationchange', ()=> setTimeout(redrawActiveCharts,300));
+
 /* ============================================================
    기록 첨부 · 파싱 · 학습
    ============================================================ */
@@ -302,10 +312,30 @@ function ensureOCR(){
 }
 async function ocrImage(dataUrl){
   await ensureOCR();
-  const { data } = await Tesseract.recognize(dataUrl, 'eng');
+  // 한국어+영어: '7월 13일' 같은 날짜와 라벨까지 인식
+  const { data } = await Tesseract.recognize(dataUrl, 'kor+eng');
   return data && data.text ? data.text : '';
 }
-/* 한 기록의 첨부 이미지를 OCR해서 수치 채우기 */
+/* 텍스트에서 날짜 추출 (애플/한국어/숫자 형식) */
+function mkDateISO(y, mo, d){
+  const now = new Date();
+  let year = y || now.getFullYear();
+  const dt = new Date(year, mo-1, d, 12, 0, 0);
+  if(isNaN(dt.getTime())) return null;
+  // 연도 미기재인데 미래 날짜면 작년으로 보정
+  if(!y && dt.getTime() > now.getTime() + 86400000) dt.setFullYear(year-1);
+  return dt.toISOString();
+}
+function parseDateFromText(text){
+  const t = (text||'').replace(/\s+/g,' ');
+  let m;
+  m = t.match(/(20\d{2})\s*[.\-\/년]\s*(\d{1,2})\s*[.\-\/월]\s*(\d{1,2})/); // 2025.7.13 / 2025년 7월 13일
+  if(m) return mkDateISO(+m[1], +m[2], +m[3]);
+  m = t.match(/(\d{1,2})\s*월\s*(\d{1,2})\s*일/);                          // 7월 13일
+  if(m && +m[1]>=1 && +m[1]<=12 && +m[2]>=1 && +m[2]<=31) return mkDateISO(null, +m[1], +m[2]);
+  return null;
+}
+/* 한 기록의 첨부 이미지를 OCR해서 수치 + 날짜 채우기 */
 async function applyOcrToRecord(rec){
   const f = await DB.get('files', rec.id);
   if(!f || !f.dataUrl) return false;
@@ -315,6 +345,8 @@ async function applyOcrToRecord(rec){
   ['distanceKm','durationSec','avgPaceSec','avgHr','cadence'].forEach(k=>{
     if(p[k]!=null){ rec[k] = p[k]; changed = true; }
   });
+  const iso = parseDateFromText(text);
+  if(iso){ rec.date = iso; changed = true; }
   if(changed){
     rec.type = guessType((rec.notes||'')+(rec.fileName||''), rec.distanceKm, rec.avgPaceSec) || rec.type;
     rec.needsReview = !rec.distanceKm;
@@ -327,16 +359,18 @@ async function applyOcrToRecord(rec){
 /* 수치 없는 이미지 기록 일괄 인식 */
 async function ocrAllImages(){
   const targets = state.records.filter(r=>r.hasImage && (r.distanceKm==null || r.avgPaceSec==null));
-  if(!targets.length){ toast('인식할 이미지 기록이 없어요'); return; }
-  toast('OCR 준비 중… (첫 실행은 다운로드로 시간이 걸려요)');
+  if(!targets.length){ toast('인식할 이미지 기록이 없어요 (이미 인식됨)'); return; }
+  toast('인식 엔진 준비 중… (첫 실행은 다운로드로 20~40초 걸릴 수 있어요)');
+  try{ await ensureOCR(); }
+  catch(e){ toast('인식 엔진 로드 실패 · 인터넷 연결 확인 후 다시 시도'); return; }
   let ok = 0;
   for(let i=0;i<targets.length;i++){
     toast(`이미지 인식 중… ${i+1}/${targets.length}`);
     try{ if(await applyOcrToRecord(targets[i])) ok++; }catch(e){ /* 개별 실패 무시 */ }
+    state.records.sort((a,b)=>new Date(b.date)-new Date(a.date));
     recompute(); renderRecords();
   }
-  recompute(); renderRecords();
-  toast(`인식 완료 · ${ok}/${targets.length}개 수치 반영`);
+  toast(ok? `인식 완료 · ${ok}/${targets.length}개 반영 (거리·페이스·심박·케이던스·날짜)` : '수치를 찾지 못했어요 · 스크린샷이 선명한지 확인 후 재시도');
 }
 
 /* GPX 파싱 */
@@ -426,6 +460,7 @@ async function handleFiles(files){
     for(let i=0;i<imgRecs.length;i++){
       toast(`이미지 인식 중… ${i+1}/${imgRecs.length}`);
       try{ if(await applyOcrToRecord(imgRecs[i])) ok++; }catch(e){}
+      state.records.sort((a,b)=>new Date(b.date)-new Date(a.date));
       recompute(); renderRecords();
     }
     toast(ok? `${ok}개 이미지 수치 자동 반영 ✓` : '자동 인식 실패 · 탭하여 직접 보정');
@@ -466,12 +501,13 @@ function editRecord(id){
     try{
       const changed = await applyOcrToRecord(r);
       if(changed){
+        $('#e_date').value = isoDay(r.date);
         $('#e_dist').value = r.distanceKm ?? '';
         $('#e_dur').value  = r.durationSec ? (r.durationSec/60).toFixed(1) : '';
         $('#e_hr').value   = r.avgHr ?? '';
         $('#e_cad').value  = r.cadence ?? '';
         if(r.type) $('#e_type').value = r.type;
-        toast('인식 완료 · 확인 후 저장');
+        toast('인식 완료 · 날짜/수치 확인 후 저장');
       } else toast('수치를 찾지 못했어요');
     }catch(e){ toast('인식 실패'); }
     b.textContent='🔍 이미지에서 수치 다시 인식'; b.disabled=false;
@@ -1370,7 +1406,7 @@ async function boot(){
   // 영구 저장 요청 (데이터 보존)
   if(navigator.storage&&navigator.storage.persist){ try{ await navigator.storage.persist(); }catch(e){} }
   // 서비스워커
-  if('serviceWorker' in navigator){ try{ await navigator.serviceWorker.register('sw.js'); }catch(e){} }
+  if('serviceWorker' in navigator){ try{ const reg=await navigator.serviceWorker.register('sw.js'); reg.update&&reg.update(); }catch(e){} }
   go('home');
   // 첫 실행 안내
   if(!state.records.length){
