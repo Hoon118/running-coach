@@ -393,10 +393,44 @@ function ensureOCR(){
   });
   return _ocrLoading;
 }
+/* OCR 전처리: 그레이스케일 → 어두운 배경 반전 → 대비 강화 → 업스케일
+   (애플 피트니스처럼 '검은 배경 + 컬러 숫자'는 그대로면 인식률이 낮음) */
+function preprocessForOCR(dataUrl){
+  return new Promise((resolve)=>{
+    const img = new Image();
+    img.onload = ()=>{
+      try{
+        const targetW = 1600;
+        const scale = img.width < targetW ? Math.min(targetW/img.width, 2.5) : 1;
+        const w = Math.round(img.width*scale), h = Math.round(img.height*scale);
+        const cv = document.createElement('canvas'); cv.width=w; cv.height=h;
+        const ctx = cv.getContext('2d', { willReadFrequently:true });
+        ctx.drawImage(img, 0, 0, w, h);
+        const id = ctx.getImageData(0,0,w,h), d = id.data;
+        let sum=0; for(let i=0;i<d.length;i+=4){ sum += 0.299*d[i]+0.587*d[i+1]+0.114*d[i+2]; }
+        const dark = (sum/(d.length/4)) < 128;     // 배경이 어두우면 반전
+        const contrast = 1.7, mid = 128;
+        for(let i=0;i<d.length;i+=4){
+          let g = 0.299*d[i]+0.587*d[i+1]+0.114*d[i+2];
+          if(dark) g = 255 - g;
+          g = (g - mid)*contrast + mid;
+          g = g<0?0:g>255?255:g;
+          d[i]=d[i+1]=d[i+2]=g;
+        }
+        ctx.putImageData(id,0,0);
+        resolve(cv.toDataURL('image/png'));
+      }catch(e){ resolve(dataUrl); }
+    };
+    img.onerror = ()=> resolve(dataUrl);
+    img.src = dataUrl;
+  });
+}
 async function ocrImage(dataUrl){
   await ensureOCR();
+  let src = dataUrl;
+  try{ src = await preprocessForOCR(dataUrl); }catch(e){}
   // 한국어+영어: '7월 13일' 같은 날짜와 라벨까지 인식
-  const { data } = await Tesseract.recognize(dataUrl, 'kor+eng');
+  const { data } = await Tesseract.recognize(src, 'kor+eng');
   return data && data.text ? data.text : '';
 }
 /* 텍스트에서 날짜 추출 (애플/한국어/숫자 형식) */
@@ -550,7 +584,7 @@ function mergeImageGroup(group){
     hasImage:true, distanceKm, durationSec, avgPaceSec, avgHr, cadence, splits, autoType:true, mtime,
     type: classifyRun({distanceKm, durationSec, avgPaceSec, avgHr, hint:(primary.text||'')+' '+(primary.fileName||'')}),
     needsReview: !distanceKm, imageCount: group.length,
-    ocrText: (primary.text||'').slice(0,400) };
+    ocrText: group.map(g=>g.text||'').filter(Boolean).join('\n---\n').slice(0,1500) };
   rec._images = [primary.dataUrl, ...group.filter(g=>g!==primary).map(g=>g.dataUrl)];
   return rec;
 }
@@ -630,10 +664,11 @@ async function attachImageToRecord(ex, item){
     if(item.p.avgHr!=null) ex.avgHr=item.p.avgHr;
     if(item.p.cadence!=null) ex.cadence=item.p.cadence;
     if(item.iso) ex.date=item.iso;
-    if(item.text) ex.ocrText=(item.text||'').slice(0,400);
+    if(item.text) ex.ocrText=((ex.ocrText?ex.ocrText+'\n---\n':'')+(item.text||'')).slice(0,1500);
   } else {           // 스플릿이 합류 → 빈 값만 보완 + 구간 데이터 저장
     if(item.splits && item.splits.length>=2 && !(ex.splits&&ex.splits.length>=2)) ex.splits=item.splits;
     ['avgHr','cadence'].forEach(k=>{ if(ex[k]==null && item.p[k]!=null) ex[k]=item.p[k]; });
+    if(item.text) ex.ocrText=((ex.ocrText?ex.ocrText+'\n---\n':'')+(item.text||'')).slice(0,1500);
   }
   if(ex.distanceKm && ex.durationSec && !ex.avgPaceSec) ex.avgPaceSec=ex.durationSec/ex.distanceKm;
   ex.imgKind='both'; ex.needsReview=!ex.distanceKm;
@@ -1004,6 +1039,8 @@ function openRecordReport(id){
     <div class="hr"></div><div class="sectitle">코치 피드백</div>
     ${fb.map(x=>`<div class="note" style="font-size:12.5px;color:var(--txt);line-height:1.55">${x}</div>`).join('')}
     ${r.notes?`<div class="hr"></div><div class="sectitle">메모</div><div class="note" style="color:var(--txt)">${r.notes}</div>`:''}
+    ${r.ocrText?`<div class="hr"></div><details><summary style="font-size:12px;color:var(--sub);cursor:pointer">🔍 인식 원문 보기(진단용)</summary>
+      <pre style="white-space:pre-wrap;font-size:11px;color:var(--sub);background:var(--line);padding:8px;border-radius:8px;margin-top:6px;overflow:auto">${(r.ocrText||'').replace(/[<>&]/g,c=>({'<':'&lt;','>':'&gt;','&':'&amp;'}[c]))}</pre></details>`:''}
     <div class="row" style="margin-top:16px">
       <button class="btn danger" id="rr_del">삭제</button>
       <button class="btn" id="rr_edit">✏️ 편집</button>
