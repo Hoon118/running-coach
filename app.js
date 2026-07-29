@@ -234,15 +234,20 @@ function go(tab){
 }
 $$('nav.tabbar button').forEach(b=> b.addEventListener('click', ()=>go(b.dataset.tab)) );
 
-/* 화면 크기/방향 변화 시 현재 탭 차트 다시 그리기 (유동적 리사이즈) */
+/* 화면 '가로폭'이 바뀔 때만 캔버스만 다시 그림 (DOM 재생성 없음)
+   ※ iOS는 세로 스크롤 시 주소창이 접히며 resize가 계속 발생 → 폭 변화만 감지해 스크롤 튐 방지 */
 function redrawActiveCharts(){
   const active = document.querySelector('.page.active'); if(!active) return;
   if(active.id==='page-home') drawWeeklyChart();
-  else if(active.id==='page-analysis') renderAnalysis();
+  else if(active.id==='page-analysis'){ drawZoneChart(); drawPaceChart(); }
 }
-let _rzTimer;
-window.addEventListener('resize', ()=>{ clearTimeout(_rzTimer); _rzTimer=setTimeout(redrawActiveCharts,150); });
-window.addEventListener('orientationchange', ()=> setTimeout(redrawActiveCharts,300));
+let _rzTimer, _lastW = window.innerWidth;
+window.addEventListener('resize', ()=>{
+  if(window.innerWidth === _lastW) return;   // 높이만 변한 경우(주소창 접힘 등) 무시
+  _lastW = window.innerWidth;
+  clearTimeout(_rzTimer); _rzTimer = setTimeout(redrawActiveCharts, 200);
+});
+window.addEventListener('orientationchange', ()=> setTimeout(()=>{ _lastW=window.innerWidth; redrawActiveCharts(); }, 300));
 
 /* ============================================================
    기록 첨부 · 파싱 · 학습
