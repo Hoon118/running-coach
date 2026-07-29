@@ -483,7 +483,7 @@ async function fileToRecord(file){
   const name = file.name || '';
   const lower = name.toLowerCase();
   const base = { id:uid(), date:new Date(file.lastModified||Date.now()).toISOString(),
-                 source:'file', fileName:name, notes:'' };
+                 source:'file', fileName:name, notes:'', autoType:true };
   if(/\.(gpx)$/i.test(lower)){
     const txt = await file.text(); const p = parseGPX(txt);
     if(p) Object.assign(base, p, {type:classifyRun({...p, hint:name})});
@@ -532,12 +532,25 @@ function mergeImageGroup(group){
   const splitsItem = group.find(g=>g.splits && g.splits.length>=2);
   const splits = splitsItem ? splitsItem.splits : null;
   const rec = { id:uid(), date:iso, source:'image', fileName:primary.fileName||'', notes:'',
-    hasImage:true, distanceKm, durationSec, avgPaceSec, avgHr, cadence, splits,
+    hasImage:true, distanceKm, durationSec, avgPaceSec, avgHr, cadence, splits, autoType:true,
     type: classifyRun({distanceKm, durationSec, avgPaceSec, avgHr, hint:(primary.text||'')+' '+(primary.fileName||'')}),
     needsReview: !distanceKm, imageCount: group.length,
     ocrText: (primary.text||'').slice(0,400) };
   rec._images = [primary.dataUrl, ...group.filter(g=>g!==primary).map(g=>g.dataUrl)];
   return rec;
+}
+
+/* 자동 분류된 기록을 현재 훈련 존(전체 데이터) 기준으로 재분류 (사용자가 직접 지정한 건 유지) */
+async function reclassifyAllAuto(){
+  let changed = false;
+  for(const r of state.records){
+    if(r.autoType===false) continue;
+    if(!(r.distanceKm || r.avgPaceSec || r.avgHr)) continue;
+    const t = classifyRun({distanceKm:r.distanceKm, durationSec:r.durationSec, avgPaceSec:r.avgPaceSec, avgHr:r.avgHr,
+                           hint:(r.notes||'')+' '+(r.fileName||'')+' '+(r.ocrText||'')});
+    if(t && t!==r.type){ r.type=t; await DB.put('records', r); changed=true; }
+  }
+  return changed;
 }
 
 async function handleFiles(files){
@@ -566,11 +579,13 @@ async function handleFiles(files){
       if(ocrReady){ try{ text = await ocrImage(dataUrl); }catch(e){} }
       const p = parseTextMetrics(text||f.name||'');
       const splits = parseSplits(text||'');
-      if(splits.length>=2){ // 스플릿으로 총합 보완 (요약 수치가 비어 있으면)
+      if(splits.length>=2){
+        // 스플릿 화면엔 총거리/시간 표기가 없고 '1.00킬로미터' 같은 구간 라벨만 있음
+        // → 잘못 읽힌 총거리 대신 구간 합계를 총합으로 신뢰
         const tot = splitsTotals(splits);
-        if(p.distanceKm==null) p.distanceKm = tot.distanceKm;
-        if(p.durationSec==null) p.durationSec = tot.durationSec;
-        if(p.avgPaceSec==null) p.avgPaceSec = tot.avgPaceSec;
+        p.distanceKm = tot.distanceKm;
+        p.durationSec = tot.durationSec;
+        p.avgPaceSec = tot.avgPaceSec;
         if(p.avgHr==null) p.avgHr = tot.avgHr;
         if(p.cadence==null) p.cadence = tot.cadence;
       }
@@ -580,19 +595,24 @@ async function handleFiles(files){
     const groups = new Map(); let solo = 0;
     items.filter(it=>it.iso).forEach(it=>{ const key='d'+isoDay(it.iso);
       if(!groups.has(key)) groups.set(key,[]); groups.get(key).push(it); });
-    // 날짜 없는 이미지(스플릿 등) → 총거리·총시간이 일치하는 그룹에 매칭, 없으면 개별
+    // 날짜 없는 이미지(스플릿 등) → 총거리·총시간이 가장 잘 맞는 요약 그룹에 매칭, 없으면 개별
     items.filter(it=>!it.iso).forEach(it=>{
-      const id=it.p.distanceKm, iu=it.p.durationSec; let matched=null;
+      const id=it.p.distanceKm, iu=it.p.durationSec; let best=null, bestScore=Infinity;
       if(id||iu){
         for(const [k,g] of groups){
           const gd=Math.max(0,...g.map(x=>x.p.distanceKm||0));
           const gt=Math.max(0,...g.map(x=>x.p.durationSec||0));
-          const dOk = id&&gd? Math.abs(id-gd)<=0.4 : false;
-          const tOk = iu&&gt? Math.abs(iu-gt)<=45 : false;
-          if(dOk||tOk){ matched=k; break; }
+          const dOk = id&&gd? Math.abs(id-gd)<=0.5 : false;
+          const tOk = iu&&gt? Math.abs(iu-gt)<=60 : false;
+          if(dOk||tOk){
+            const ds = (id&&gd)? Math.abs(id-gd)/Math.max(gd,1) : 1;
+            const ts = (iu&&gt)? Math.abs(iu-gt)/Math.max(gt,1) : 1;
+            const score = Math.min(ds,ts);
+            if(score<bestScore){ bestScore=score; best=k; }
+          }
         }
       }
-      if(matched){ groups.get(matched).push(it); }
+      if(best){ groups.get(best).push(it); }
       else { const k='s'+(solo++); groups.set(k,[it]); }
     });
 
@@ -613,9 +633,12 @@ async function handleFiles(files){
       }
     }
     state.records.sort((a,b)=>new Date(b.date)-new Date(a.date));
+    recompute();                 // 전체 데이터로 훈련 존/학습치 계산
+    await reclassifyAllAuto();    // 존이 갖춰진 뒤 자동 분류 기록 재판정
     recompute(); renderRecords();
     toast(`정리 완료 · ${recCount}개 기록${mergedCount?` (같은 러닝 ${mergedCount}건 자동 병합)`:''}`);
   } else if(added){
+    recompute(); await reclassifyAllAuto(); recompute(); renderRecords();
     toast(`${added}개 기록 추가`);
   }
 }
@@ -693,7 +716,8 @@ function editRecord(id){
       avgHr: parseInt($('#e_hr').value)||null,
       cadence: parseInt($('#e_cad').value)||null,
       notes: $('#e_notes').value.trim(),
-      needsReview: false
+      needsReview: false,
+      autoType: false
     };
     await DB.put('records', rec);
     const i = state.records.findIndex(x=>x.id===rec.id);
@@ -1818,6 +1842,7 @@ async function boot(){
   await DB.init();
   try{ const s=localStorage.getItem('rc_settings'); if(s) state.settings=Object.assign(state.settings,JSON.parse(s)); }catch(e){}
   await loadAll();
+  await reclassifyAllAuto(); recompute();   // 기존 기록도 최신 존 기준으로 재판정
   // 영구 저장 요청 (데이터 보존)
   if(navigator.storage&&navigator.storage.persist){ try{ await navigator.storage.persist(); }catch(e){} }
   // 서비스워커
