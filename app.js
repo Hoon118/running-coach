@@ -340,6 +340,32 @@ function parseTextMetrics(text){
   return out;
 }
 
+/* 스플릿(구간) 표 파싱: "1 04:50 4'50"/KM 155BPM 175SPM" 행들을 추출 */
+function parseSplits(text){
+  const t = (text||'').replace(/\u00A0/g,' ');
+  const rows = [];
+  const re = /(\d{1,2}):(\d{2})\D{0,8}(\d{1,2})['’‘`´:](\d{2})\D{0,12}(\d{2,3})\s*bpm\D{0,12}(\d{2,3})\s*spm/gi;
+  let m;
+  while((m = re.exec(t)) && rows.length < 80){
+    const tSec = (+m[1])*60 + (+m[2]);
+    const pace = (+m[3])*60 + (+m[4]);
+    const hr = +m[5], cad = +m[6];
+    if(tSec>0 && pace>=120 && pace<=1200 && hr>=60 && hr<=230){
+      rows.push({ tSec, pace, hr, cad, km:+((tSec/pace).toFixed(3)) });
+    }
+  }
+  return rows;
+}
+/* 스플릿에서 총합 역산 */
+function splitsTotals(sp){
+  const durationSec = sp.reduce((s,x)=>s+x.tSec,0);
+  const distanceKm = +sp.reduce((s,x)=>s+x.km,0).toFixed(2);
+  const avgPaceSec = distanceKm? Math.round(durationSec/distanceKm) : null;
+  const avgHr = durationSec? Math.round(sp.reduce((s,x)=>s+x.hr*x.tSec,0)/durationSec) : null;
+  const cadence = durationSec? Math.round(sp.reduce((s,x)=>s+x.cad*x.tSec,0)/durationSec) : null;
+  return { durationSec, distanceKm, avgPaceSec, avgHr, cadence };
+}
+
 /* ── 이미지 OCR (Tesseract.js, CDN 지연 로딩) ── */
 let _ocrLoading;
 function ensureOCR(){
@@ -503,8 +529,10 @@ function mergeImageGroup(group){
   const avgHr = pick('avgHr'), cadence = pick('cadence');
   if(distanceKm && durationSec && !avgPaceSec) avgPaceSec = durationSec/distanceKm;
   const iso = group.map(g=>g.iso).find(Boolean) || new Date().toISOString();
+  const splitsItem = group.find(g=>g.splits && g.splits.length>=2);
+  const splits = splitsItem ? splitsItem.splits : null;
   const rec = { id:uid(), date:iso, source:'image', fileName:primary.fileName||'', notes:'',
-    hasImage:true, distanceKm, durationSec, avgPaceSec, avgHr, cadence,
+    hasImage:true, distanceKm, durationSec, avgPaceSec, avgHr, cadence, splits,
     type: classifyRun({distanceKm, durationSec, avgPaceSec, avgHr, hint:(primary.text||'')+' '+(primary.fileName||'')}),
     needsReview: !distanceKm, imageCount: group.length,
     ocrText: (primary.text||'').slice(0,400) };
@@ -536,12 +564,37 @@ async function handleFiles(files){
       const f = images[i]; const dataUrl = await fileToDataUrl(f);
       let text = '';
       if(ocrReady){ try{ text = await ocrImage(dataUrl); }catch(e){} }
-      items.push({ dataUrl, fileName:f.name, text, p:parseTextMetrics(text||f.name||''), iso:parseDateFromText(text||'') });
+      const p = parseTextMetrics(text||f.name||'');
+      const splits = parseSplits(text||'');
+      if(splits.length>=2){ // 스플릿으로 총합 보완 (요약 수치가 비어 있으면)
+        const tot = splitsTotals(splits);
+        if(p.distanceKm==null) p.distanceKm = tot.distanceKm;
+        if(p.durationSec==null) p.durationSec = tot.durationSec;
+        if(p.avgPaceSec==null) p.avgPaceSec = tot.avgPaceSec;
+        if(p.avgHr==null) p.avgHr = tot.avgHr;
+        if(p.cadence==null) p.cadence = tot.cadence;
+      }
+      items.push({ dataUrl, fileName:f.name, text, p, iso:parseDateFromText(text||''), splits });
     }
-    // 날짜별 그룹핑 (날짜 없으면 개별)
+    // 날짜 있는 이미지 → 날짜별 그룹
     const groups = new Map(); let solo = 0;
-    items.forEach(it=>{ const key = it.iso? ('d'+isoDay(it.iso)) : ('s'+(solo++));
+    items.filter(it=>it.iso).forEach(it=>{ const key='d'+isoDay(it.iso);
       if(!groups.has(key)) groups.set(key,[]); groups.get(key).push(it); });
+    // 날짜 없는 이미지(스플릿 등) → 총거리·총시간이 일치하는 그룹에 매칭, 없으면 개별
+    items.filter(it=>!it.iso).forEach(it=>{
+      const id=it.p.distanceKm, iu=it.p.durationSec; let matched=null;
+      if(id||iu){
+        for(const [k,g] of groups){
+          const gd=Math.max(0,...g.map(x=>x.p.distanceKm||0));
+          const gt=Math.max(0,...g.map(x=>x.p.durationSec||0));
+          const dOk = id&&gd? Math.abs(id-gd)<=0.4 : false;
+          const tOk = iu&&gt? Math.abs(iu-gt)<=45 : false;
+          if(dOk||tOk){ matched=k; break; }
+        }
+      }
+      if(matched){ groups.get(matched).push(it); }
+      else { const k='s'+(solo++); groups.set(k,[it]); }
+    });
 
     let recCount = 0, mergedCount = 0;
     for(const [,group] of groups){
@@ -749,6 +802,43 @@ function openRecordReport(id){
   }
   if(stride && stride>1.4) fb.push('보폭이 다소 큽니다. 오버스트라이드는 무릎 부담을 키울 수 있어요.');
   if(paceCmp && paceCmp.diff<-10) fb.push('👍 같은 종류 평균보다 확연히 빠릅니다. 컨디션이 좋았네요.');
+
+  // 구간(스플릿) 분석
+  let splitsHtml = '';
+  const sp = r.splits;
+  if(sp && sp.length>=2){
+    const fastest = sp.reduce((a,b)=>b.pace<a.pace?b:a);
+    const slowest = sp.reduce((a,b)=>b.pace>a.pace?b:a);
+    const fi = sp.indexOf(fastest)+1, si = sp.indexOf(slowest)+1;
+    const half = Math.floor(sp.length/2);
+    const wAvg = (arr,key)=>{ const T=arr.reduce((s,x)=>s+x.tSec,0); return T?Math.round(arr.reduce((s,x)=>s+x[key]*x.tSec,0)/T):0; };
+    const p1 = wAvg(sp.slice(0,half),'pace'), p2 = wAvg(sp.slice(half),'pace');
+    const neg = p2<p1, gap = Math.abs(p2-p1);
+    const third = Math.max(1, Math.floor(sp.length/3));
+    const hrStart = wAvg(sp.slice(0,third),'hr'), hrEnd = wAvg(sp.slice(-third),'hr');
+    const drift = hrEnd-hrStart;
+    const maxP = Math.max(...sp.map(s=>s.pace)), minP = Math.min(...sp.map(s=>s.pace));
+    const rowsHtml = sp.map((s,i)=>{
+      const w = maxP===minP?100:Math.round((maxP-s.pace)/(maxP-minP)*92)+8; // 빠를수록 길게
+      return `<div style="display:flex;align-items:center;gap:7px;font-size:11.5px;padding:3px 0">
+        <span style="width:16px;color:var(--sub)">${i+1}</span>
+        <span style="width:52px;font-weight:700">${fmtPace(s.pace)}</span>
+        <div style="flex:1;background:var(--line);border-radius:4px;height:7px;overflow:hidden"><i style="display:block;height:100%;width:${w}%;background:linear-gradient(90deg,var(--acc),var(--acc2))"></i></div>
+        <span style="width:40px;text-align:right;color:#ff5d6c">♥${s.hr}</span>
+        <span style="width:44px;text-align:right;color:var(--sub)">${s.cad}</span>
+      </div>`;
+    }).join('');
+    splitsHtml = kv('구간 수', `${sp.length}개`)
+      + kv('최고 구간', `${fi}번째 · ${fmtPace(fastest.pace)}/km`)
+      + kv('최저 구간', `${si}번째 · ${fmtPace(slowest.pace)}/km`)
+      + kv('전·후반 페이스', `${fmtPace(p1)} → ${fmtPace(p2)} <b style="color:${neg?'var(--ok)':'var(--acc2)'}">(${neg?'네거티브':'포지티브'} ${gap}초)</b>`)
+      + kv('심박 드리프트', `${hrStart} → ${hrEnd} bpm <b style="color:${drift>8?'var(--acc2)':'var(--sub)'}">${drift>0?'+':''}${drift}</b>`)
+      + `<div class="sectitle" style="margin:12px 2px 6px">구간별 · 페이스 / ♥심박 / 케이던스</div>${rowsHtml}`;
+    // 코칭
+    if(neg && gap>=5) fb.push('📈 후반이 더 빠른 네거티브 스플릿입니다. 이상적인 페이스 운영이에요.');
+    else if(!neg && gap>=20) fb.push('📉 후반에 페이스가 크게 떨어졌습니다. 초반을 조금 보수적으로 시작해 보세요.');
+    if(drift>=12) fb.push('🫀 후반 심박 드리프트가 큽니다(+'+drift+'bpm). 더위·탈수·초반 과속 가능성 — 수분 보충과 페이스 관리를 권장합니다.');
+  }
   if(!fb.length) fb.push('데이터가 더 쌓이면 개인화된 코칭이 정교해집니다.');
 
   openSheet(`
@@ -763,6 +853,7 @@ function openRecordReport(id){
     <div class="hr"></div><div class="sectitle">러닝 폼 · 효율</div>${form}
     <div class="hr"></div><div class="sectitle">이 기록 기반 레이스 예측</div>${predHtml}
     <div class="hr"></div><div class="sectitle">평균 대비</div>${cmp}
+    ${splitsHtml?`<div class="hr"></div><div class="sectitle">구간(스플릿) 분석</div>${splitsHtml}`:''}
     <div class="hr"></div><div class="sectitle">코치 피드백</div>
     ${fb.map(x=>`<div class="note" style="font-size:12.5px;color:var(--txt);line-height:1.55">${x}</div>`).join('')}
     ${r.notes?`<div class="hr"></div><div class="sectitle">메모</div><div class="note" style="color:var(--txt)">${r.notes}</div>`:''}
