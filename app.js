@@ -342,17 +342,31 @@ function parseTextMetrics(text){
 
 /* 스플릿(구간) 표 파싱: "1 04:50 4'50"/KM 155BPM 175SPM" 행들을 추출 */
 function parseSplits(text){
-  const t = (text||'').replace(/\u00A0/g,' ');
+  // 줄 단위 관대한 파서: 한 줄에 '구간시간(mm:ss)'과 '페이스(m'ss")'가 있으면 스플릿 행으로 인식
+  // (BPM/SPM 글자를 OCR이 틀려도 인식되도록, 심박·케이던스는 있으면 채움)
   const rows = [];
-  const re = /(\d{1,2}):(\d{2})\D{0,8}(\d{1,2})['’‘`´:](\d{2})\D{0,12}(\d{2,3})\s*bpm\D{0,12}(\d{2,3})\s*spm/gi;
-  let m;
-  while((m = re.exec(t)) && rows.length < 80){
-    const tSec = (+m[1])*60 + (+m[2]);
-    const pace = (+m[3])*60 + (+m[4]);
-    const hr = +m[5], cad = +m[6];
-    if(tSec>0 && pace>=120 && pace<=1200 && hr>=60 && hr<=230){
-      rows.push({ tSec, pace, hr, cad, km:+((tSec/pace).toFixed(3)) });
+  const lines = (text||'').replace(/\u00A0/g,' ').split(/[\n\r]+/);
+  for(const raw of lines){
+    const line = raw.trim(); if(!line || rows.length>=80) continue;
+    // 시간형 토큰(m:ss / m'ss" 등) 모두 추출
+    const toks = [...line.matchAll(/(\d{1,2})\s*[:'’‘`´′″"]\s*(\d{2})(?!\d)/g)];
+    if(toks.length < 2) continue;                 // 시간 + 페이스, 최소 2개 필요
+    const tSec = (+toks[0][1])*60 + (+toks[0][2]); // 첫 토큰 = 구간 시간
+    const pace = (+toks[1][1])*60 + (+toks[1][2]); // 둘째 토큰 = 페이스
+    if(!(tSec>=15 && tSec<=1200 && pace>=120 && pace<=1200)) continue;
+    // 심박(bpm)·케이던스(spm): 라벨이 있으면 우선, 없으면 남은 2~3자리 숫자로 추정
+    let hr=null, cad=null;
+    const bpm = line.match(/(\d{2,3})\s*b\s*p\s*m/i); if(bpm) hr=+bpm[1];
+    const spm = line.match(/(\d{2,3})\s*s\s*p\s*m/i); if(spm) cad=+spm[1];
+    if(hr==null || cad==null){
+      const nums=[...line.matchAll(/(\d{2,3})(?!\d)/g)].map(x=>+x[1])
+        .filter(n=>n>=90 && n<=210);               // 심박/케이던스 대역
+      for(const n of nums){
+        if(hr==null && n>=90 && n<=200){ hr=n; continue; }
+        if(cad==null && n>=120 && n<=210){ cad=n; }
+      }
     }
+    rows.push({ tSec, pace, hr, cad, km:+((tSec/pace).toFixed(3)) });
   }
   return rows;
 }
@@ -361,9 +375,9 @@ function splitsTotals(sp){
   const durationSec = sp.reduce((s,x)=>s+x.tSec,0);
   const distanceKm = +sp.reduce((s,x)=>s+x.km,0).toFixed(2);
   const avgPaceSec = distanceKm? Math.round(durationSec/distanceKm) : null;
-  const avgHr = durationSec? Math.round(sp.reduce((s,x)=>s+x.hr*x.tSec,0)/durationSec) : null;
-  const cadence = durationSec? Math.round(sp.reduce((s,x)=>s+x.cad*x.tSec,0)/durationSec) : null;
-  return { durationSec, distanceKm, avgPaceSec, avgHr, cadence };
+  const wavg = (f)=>{ const r=sp.filter(x=>x[f]!=null); if(!r.length) return null;
+    const w=r.reduce((s,x)=>s+x.tSec,0); return w? Math.round(r.reduce((s,x)=>s+x[f]*x.tSec,0)/w):null; };
+  return { durationSec, distanceKm, avgPaceSec, avgHr:wavg('hr'), cadence:wavg('cad') };
 }
 
 /* ── 이미지 OCR (Tesseract.js, CDN 지연 로딩) ── */
@@ -909,15 +923,77 @@ function openRecordReport(id){
       <button class="btn danger" id="rr_del">삭제</button>
       <button class="btn" id="rr_edit">✏️ 편집</button>
       <button class="btn primary block" id="rr_close">확인</button>
-    </div>`);
+    </div>
+    <button class="btn block" id="rr_merge" style="margin-top:8px">🔗 다른 기록과 합치기(사진 모으기)</button>`);
   $('#rr_edit').onclick = ()=> editRecord(id);
   $('#rr_del').onclick = ()=> deleteRecord(id);
   $('#rr_close').onclick = ()=> closeSheet();
+  $('#rr_merge').onclick = ()=> openMergePicker(id);
   if(r.hasImage){ (async ()=>{
     const keys=[r.id]; for(let i=1;i<(r.imageCount||1);i++) keys.push(r.id+'#'+i);
     const imgs=[]; for(const k of keys){ const f=await DB.get('files',k); if(f) imgs.push(f.dataUrl); }
     const box=$('#rr_thumb'); if(box&&imgs.length) box.innerHTML = imgs.map(u=>`<img src="${u}" style="width:100%;border-radius:12px;margin-bottom:8px;display:block">`).join('');
   })(); }
+}
+
+/* 수동 합치기: 대상 기록 목록을 보여주고 선택하면 두 기록을 하나로 병합 */
+function openMergePicker(id){
+  const base = state.records.find(r=>r.id===id); if(!base) return;
+  const others = state.records.filter(r=>r.id!==id && r.source==='image')
+    .sort((a,b)=>new Date(b.date)-new Date(a.date));
+  if(!others.length){ toast('합칠 다른 사진 기록이 없어요'); return; }
+  const rows = others.map(r=>{
+    const t=TYPES[r.type]||TYPES.easy;
+    const meta=[r.distanceKm!=null?r.distanceKm.toFixed(2)+'km':'', r.durationSec?fmtDuration(r.durationSec):'',
+                r.splits&&r.splits.length>=2?'스플릿':(r.imageCount>1?'사진'+r.imageCount:'요약')].filter(Boolean).join(' · ');
+    return `<button class="btn block" data-mid="${r.id}" style="text-align:left;margin-bottom:6px">
+      <span class="tag ${t.css}" style="margin-right:6px">${t.label}</span>${fmtDate(r.date)}
+      <span style="color:var(--sub);font-size:12px"> · ${meta}</span></button>`;
+  }).join('');
+  openSheet(`<h3 style="margin-top:0">이 기록에 합칠 기록 선택</h3>
+    <div class="note" style="margin-bottom:10px">선택한 기록의 사진·데이터가 <b>${fmtDate(base.date)}</b> 기록으로 합쳐지고, 선택한 기록은 삭제됩니다.</div>
+    ${rows}
+    <button class="btn block" id="mg_cancel" style="margin-top:6px">취소</button>`);
+  document.querySelectorAll('[data-mid]').forEach(b=>{
+    b.onclick = async ()=>{ await mergeTwoRecords(id, b.dataset.mid); };
+  });
+  $('#mg_cancel').onclick = ()=> openRecordReport(id);
+}
+
+/* base 기록에 other의 사진(들)과 데이터를 합치고 other 삭제 */
+async function mergeTwoRecords(baseId, otherId){
+  const base = state.records.find(r=>r.id===baseId);
+  const other = state.records.find(r=>r.id===otherId);
+  if(!base || !other) return;
+  // other의 이미지들을 base 뒤에 이어붙임
+  const otherKeys=[other.id]; for(let i=1;i<(other.imageCount||1);i++) otherKeys.push(other.id+'#'+i);
+  let n = base.imageCount||1;
+  for(const k of otherKeys){
+    const f = await DB.get('files', k);
+    if(f && f.dataUrl){ await DB.put('files', { id: base.id+'#'+n, dataUrl:f.dataUrl }); n++; }
+  }
+  base.imageCount = n; base.hasImage = true;
+  // 데이터 보완: 요약(거리+시간 둘 다 있는 쪽) 우선, 스플릿은 있는 쪽 사용
+  const baseComplete = base.distanceKm && base.durationSec;
+  const otherComplete = other.distanceKm && other.durationSec;
+  if(!baseComplete && otherComplete){
+    base.distanceKm=other.distanceKm; base.durationSec=other.durationSec;
+    if(other.avgPaceSec) base.avgPaceSec=other.avgPaceSec;
+    if(other.date) base.date=other.date;
+  }
+  ['avgHr','cadence','avgPaceSec','distanceKm','durationSec'].forEach(k=>{ if(base[k]==null && other[k]!=null) base[k]=other[k]; });
+  if((!base.splits||base.splits.length<2) && other.splits && other.splits.length>=2) base.splits=other.splits;
+  if(base.distanceKm && base.durationSec && !base.avgPaceSec) base.avgPaceSec=base.durationSec/base.distanceKm;
+  base.imgKind='both'; base.needsReview=!base.distanceKm;
+  await DB.put('records', base);
+  // other 삭제(파일 포함)
+  await DB.del('records', other.id);
+  for(const k of otherKeys) await DB.del('files', k).catch(()=>{});
+  state.records = state.records.filter(r=>r.id!==other.id);
+  recompute(); await reclassifyAllAuto(); recompute();
+  renderRecords();
+  toast('합쳤어요 · 사진과 데이터가 한 기록으로');
+  openRecordReport(baseId);
 }
 
 async function deleteRecord(id){
