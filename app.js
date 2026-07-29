@@ -5,6 +5,9 @@
 
 'use strict';
 
+/* 앱 버전 (sw.js 캐시 버전과 동일하게 유지) */
+const APP_VERSION = 'v17';
+
 /* ---------- 세션 타입 정의 ---------- */
 const TYPES = {
   nsm:      { key:'nsm',      label:'NSM',    css:'nsm',      desc:'노르웨이식 싱글 · 역치 바로 아래(서브스레숄드) 반복' },
@@ -2531,6 +2534,7 @@ $('#btnSettings').onclick = ()=>{
     <div style="height:10px"></div>
     <button class="btn primary block" id="set_save">저장</button>
     <div class="note">앱 데이터는 이 기기에만 저장됩니다(IndexedDB). 홈 화면에 추가하면 오프라인에서도 동작해요.</div>
+    <div style="text-align:center;font-size:12px;color:var(--mut);margin-top:14px">런코치 · 버전 ${APP_VERSION}</div>
   `);
   $('#set_shoes').onclick=()=>{ closeSheet(); go('shoes'); };
   $('#v_test').onclick=()=>{
