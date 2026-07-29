@@ -253,19 +253,57 @@ window.addEventListener('orientationchange', ()=> setTimeout(()=>{ _lastW=window
    기록 첨부 · 파싱 · 학습
    ============================================================ */
 
-/* 타입 자동 추론 (파일명/텍스트 키워드 + 거리/페이스 휴리스틱) */
-function guessType(text, distKm, paceSec){
+/* 파일명/메모의 명시 키워드로 타입 판정 (없으면 null) */
+function keywordType(text){
   const t = (text||'').toLowerCase();
   if(/interval|인터벌|반복|repeat|400m|800m|1000m|1km rep/.test(t)) return 'interval';
   if(/tempo|템포|threshold|임계|lt\b/.test(t)) return 'tempo';
   if(/lsd|long run|장거리|롱런|long slow/.test(t)) return 'lsd';
   if(/recovery|회복|리커버리/.test(t)) return 'recovery';
-  if(/nsm|stride|스트라이드|신경근|스피드|sprint|전력/.test(t)) return 'nsm';
-  if(/race|대회|레이스|marathon|마라톤 대회/.test(t)) return 'race';
-  // 휴리스틱: 거리·페이스 기반
+  if(/nsm|서브\s?t|sub[- ]?t|서브스레숄드|neuromuscular|singles/.test(t)) return 'nsm';
+  if(/race|대회|레이스|marathon race|마라톤 대회/.test(t)) return 'race';
+  return null;
+}
+
+/* 타입 자동 추론 (파일명/텍스트 키워드 + 거리/페이스 휴리스틱) */
+function guessType(text, distKm, paceSec){
+  const kw = keywordType(text); if(kw) return kw;
   if(distKm && distKm >= 18) return 'lsd';
-  if(distKm && distKm >= 12) return 'easy';
   return 'easy';
+}
+
+/* 러닝 자동 분류: 키워드 → 롱런 → 페이스존+심박 → 심박 → 거리 순으로 판정
+   페이스·심박·거리·시간을 사용자 훈련 존(state.metrics.zones)과 비교해 이지/템포/인터벌/롱런/회복/NSM 분류 */
+function classifyRun({distanceKm, avgPaceSec, avgHr, durationSec, hint}){
+  const kw = keywordType(hint); if(kw) return kw;
+  const z = state.metrics && state.metrics.zones;
+  const maxHR = state.settings.maxHR || 190;
+  const durMin = durationSec ? durationSec/60 : (distanceKm && avgPaceSec ? distanceKm*avgPaceSec/60 : null);
+  const hrPct = avgHr ? avgHr/maxHR : null;
+  const longThresh = (state.settings.targetRace==='full') ? 18 : 16;
+
+  // 1) 롱런: 90분↑ 또는 장거리 + 강도 낮음
+  if(((durMin && durMin>=90) || (distanceKm && distanceKm>=longThresh)) && (!hrPct || hrPct<0.83)) return 'lsd';
+
+  // 2) 페이스 존 기반 (가장 가까운 존) + 심박 보정
+  if(avgPaceSec && z){
+    if(hrPct && hrPct<0.66 && avgPaceSec >= (z.easy||1e9)) return 'recovery';
+    const cand = [['interval',z.interval],['nsm',z.nsm],['tempo',z.tempo],['marathon',z.marathon],['easy',z.easy],['recovery',z.recovery]].filter(x=>x[1]);
+    let best='easy', bd=1e9; cand.forEach(([t,p])=>{ const d=Math.abs(avgPaceSec-p); if(d<bd){bd=d;best=t;} });
+    if(best==='marathon') best = (distanceKm && distanceKm>=longThresh) ? 'lsd' : 'easy'; // marathon은 별도 타입이 없어 롱런/이지로
+    return best;
+  }
+
+  // 3) 심박%만 있을 때
+  if(hrPct){
+    if(hrPct<0.66) return 'recovery';
+    if(hrPct<0.78) return (distanceKm && distanceKm>=longThresh) ? 'lsd' : 'easy';
+    if(hrPct<0.86) return 'tempo';
+    return 'interval';
+  }
+
+  // 4) 최후: 거리/페이스 휴리스틱
+  return guessType(hint||'', distanceKm, avgPaceSec);
 }
 
 /* 자유 텍스트/OCR 결과에서 수치 추출 (애플 피트니스·Strava·Garmin·Zepp 형식 대응) */
@@ -353,7 +391,7 @@ async function applyOcrToRecord(rec){
   const iso = parseDateFromText(text);
   if(iso){ rec.date = iso; changed = true; }
   if(changed){
-    rec.type = guessType((rec.notes||'')+(rec.fileName||''), rec.distanceKm, rec.avgPaceSec) || rec.type;
+    rec.type = classifyRun({distanceKm:rec.distanceKm, durationSec:rec.durationSec, avgPaceSec:rec.avgPaceSec, avgHr:rec.avgHr, hint:(rec.notes||'')+' '+(rec.fileName||'')+' '+text}) || rec.type;
     rec.needsReview = !rec.distanceKm;
     rec.ocrText = text.slice(0, 400);
     await DB.put('records', rec);
@@ -422,15 +460,15 @@ async function fileToRecord(file){
                  source:'file', fileName:name, notes:'' };
   if(/\.(gpx)$/i.test(lower)){
     const txt = await file.text(); const p = parseGPX(txt);
-    if(p) Object.assign(base, p, {type:guessType(name,p.distanceKm,p.avgPaceSec)});
+    if(p) Object.assign(base, p, {type:classifyRun({...p, hint:name})});
   } else if(/\.(tcx)$/i.test(lower)){
     const txt = await file.text(); const p = parseTCX(txt);
-    if(p) Object.assign(base, p, {type:guessType(name,p.distanceKm,p.avgPaceSec)});
+    if(p) Object.assign(base, p, {type:classifyRun({...p, hint:name})});
   } else if(/\.(txt|csv)$/i.test(lower)){
     const txt = await file.text(); const p = parseTextMetrics(txt);
     Object.assign(base, {distanceKm:p.distanceKm||null, durationSec:p.durationSec||null,
       avgPaceSec:p.avgPaceSec||null, avgHr:p.avgHr||null, cadence:p.cadence||null,
-      type:guessType(txt+name,p.distanceKm,p.avgPaceSec)});
+      type:classifyRun({...p, hint:txt+' '+name})});
   } else if(file.type.startsWith('image/')){
     // 이미지: 썸네일 저장. 파일명에 수치가 있으면 추출, 없으면 수동 보정 유도
     const dataUrl = await new Promise(r=>{ const fr=new FileReader(); fr.onload=()=>r(fr.result); fr.readAsDataURL(file); });
@@ -467,7 +505,7 @@ function mergeImageGroup(group){
   const iso = group.map(g=>g.iso).find(Boolean) || new Date().toISOString();
   const rec = { id:uid(), date:iso, source:'image', fileName:primary.fileName||'', notes:'',
     hasImage:true, distanceKm, durationSec, avgPaceSec, avgHr, cadence,
-    type: guessType(primary.fileName||'', distanceKm, avgPaceSec),
+    type: classifyRun({distanceKm, durationSec, avgPaceSec, avgHr, hint:(primary.text||'')+' '+(primary.fileName||'')}),
     needsReview: !distanceKm, imageCount: group.length,
     ocrText: (primary.text||'').slice(0,400) };
   rec._images = [primary.dataUrl, ...group.filter(g=>g!==primary).map(g=>g.dataUrl)];
@@ -572,6 +610,23 @@ function editRecord(id){
     }catch(e){ toast('인식 실패'); }
     b.textContent='🔍 이미지에서 수치 다시 인식'; b.disabled=false;
   }; }
+  // 수치 입력 시 종류 자동 분류 (사용자가 종류를 직접 선택하면 중단)
+  let typeTouched = false;
+  const typeSel = $('#e_type');
+  if(typeSel) typeSel.addEventListener('change', ()=> typeTouched=true);
+  function autoClassifyEdit(){
+    if(typeTouched || !typeSel) return;
+    const dist = parseFloat($('#e_dist').value)||null;
+    const durMin = parseFloat($('#e_dur').value)||null;
+    const hr = parseInt($('#e_hr').value)||null;
+    if(!dist && !durMin && !hr) return;
+    const durSec = durMin?durMin*60:null;
+    const pace = (dist&&durSec)? durSec/dist : (r.avgPaceSec||null);
+    const type = classifyRun({distanceKm:dist, durationSec:durSec, avgPaceSec:pace, avgHr:hr, hint:$('#e_notes').value});
+    if(type) typeSel.value = type;
+  }
+  ['e_dist','e_dur','e_hr'].forEach(idf=>{ const el=$('#'+idf); if(el) el.addEventListener('input', autoClassifyEdit); });
+
   $('#e_save').onclick = async ()=>{
     const dist = parseFloat($('#e_dist').value)||null;
     const durMin = parseFloat($('#e_dur').value)||null;
@@ -713,10 +768,12 @@ function openRecordReport(id){
     ${r.notes?`<div class="hr"></div><div class="sectitle">메모</div><div class="note" style="color:var(--txt)">${r.notes}</div>`:''}
     <div class="row" style="margin-top:16px">
       <button class="btn danger" id="rr_del">삭제</button>
-      <button class="btn primary block" id="rr_edit">✏️ 편집</button>
+      <button class="btn" id="rr_edit">✏️ 편집</button>
+      <button class="btn primary block" id="rr_close">확인</button>
     </div>`);
   $('#rr_edit').onclick = ()=> editRecord(id);
   $('#rr_del').onclick = ()=> deleteRecord(id);
+  $('#rr_close').onclick = ()=> closeSheet();
   if(r.hasImage){ (async ()=>{
     const keys=[r.id]; for(let i=1;i<(r.imageCount||1);i++) keys.push(r.id+'#'+i);
     const imgs=[]; for(const k of keys){ const f=await DB.get('files',k); if(f) imgs.push(f.dataUrl); }
