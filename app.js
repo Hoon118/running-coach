@@ -566,7 +566,7 @@ async function handleFiles(files){
   }
   if(others.length){ state.records.sort((a,b)=>new Date(b.date)-new Date(a.date)); recompute(); renderRecords(); }
 
-  // 2) 이미지: OCR → 날짜별 그룹 → 같은 러닝 자동 병합
+  // 2) 이미지: OCR → 요약/스플릿 구분 → 거리·시간으로 스플릿을 요약에 1:1 매칭
   if(images.length){
     toast(`이미지 인식 준비 중… (${images.length}장, 첫 실행은 다소 걸려요)`);
     let ocrReady = true;
@@ -579,7 +579,11 @@ async function handleFiles(files){
       if(ocrReady){ try{ text = await ocrImage(dataUrl); }catch(e){} }
       const p = parseTextMetrics(text||f.name||'');
       const splits = parseSplits(text||'');
-      if(splits.length>=2){
+      // 스플릿 '전용' 화면 판별: 구간표가 2행 이상 + 총시간(h:mm:ss)이 없음
+      // (요약 화면은 '0:39:11' 같은 총시간이 있어 스플릿 미리보기가 조금 보여도 요약으로 취급)
+      const hasHMS = /\d{1,2}:\d{2}:\d{2}/.test(text||'');
+      const isSplit = splits.length>=2 && !hasHMS;
+      if(isSplit){
         // 스플릿 화면엔 총거리/시간 표기가 없고 '1.00킬로미터' 같은 구간 라벨만 있음
         // → 잘못 읽힌 총거리 대신 구간 합계를 총합으로 신뢰
         const tot = splitsTotals(splits);
@@ -589,48 +593,41 @@ async function handleFiles(files){
         if(p.avgHr==null) p.avgHr = tot.avgHr;
         if(p.cadence==null) p.cadence = tot.cadence;
       }
-      items.push({ dataUrl, fileName:f.name, text, p, iso:parseDateFromText(text||''), splits });
+      items.push({ dataUrl, fileName:f.name, text, p, iso:parseDateFromText(text||''),
+                   splits: isSplit ? splits : null, isSplit });
     }
-    // 날짜 있는 이미지 → 날짜별 그룹
-    const groups = new Map(); let solo = 0;
-    items.filter(it=>it.iso).forEach(it=>{ const key='d'+isoDay(it.iso);
-      if(!groups.has(key)) groups.set(key,[]); groups.get(key).push(it); });
-    // 날짜 없는 이미지(스플릿 등) → 총거리·총시간이 가장 잘 맞는 요약 그룹에 매칭, 없으면 개별
-    items.filter(it=>!it.iso).forEach(it=>{
-      const id=it.p.distanceKm, iu=it.p.durationSec; let best=null, bestScore=Infinity;
-      if(id||iu){
-        for(const [k,g] of groups){
-          const gd=Math.max(0,...g.map(x=>x.p.distanceKm||0));
-          const gt=Math.max(0,...g.map(x=>x.p.durationSec||0));
-          const dOk = id&&gd? Math.abs(id-gd)<=0.5 : false;
-          const tOk = iu&&gt? Math.abs(iu-gt)<=60 : false;
-          if(dOk||tOk){
-            const ds = (id&&gd)? Math.abs(id-gd)/Math.max(gd,1) : 1;
-            const ts = (iu&&gt)? Math.abs(iu-gt)/Math.max(gt,1) : 1;
-            const score = Math.min(ds,ts);
-            if(score<bestScore){ bestScore=score; best=k; }
-          }
-        }
-      }
-      if(best){ groups.get(best).push(it); }
-      else { const k='s'+(solo++); groups.set(k,[it]); }
+    // 요약(운동 세부사항) = 러닝 하나. 요약끼리는 절대 병합하지 않음(같은 날 2회도 별도)
+    const runItems  = items.filter(it=>!it.isSplit);
+    const splitImgs = items.filter(it=>it.isSplit);
+    const runs = runItems.map(it=>({ primary:it, parts:[it], hasSplits:false }));
+
+    // 각 스플릿 화면 → 총거리·총시간이 가장 잘 맞는 요약에 1:1 매칭
+    splitImgs.forEach(sp=>{
+      const sd=sp.p.distanceKm, st=sp.p.durationSec; let best=null, bestScore=Infinity;
+      runs.forEach(run=>{
+        if(run.hasSplits) return; // 요약 1개엔 스플릿 1개만
+        const rd=run.primary.p.distanceKm, rt=run.primary.p.durationSec;
+        const dOk = sd&&rd ? Math.abs(sd-rd)<=0.6 : false;   // 거리 ±0.6km
+        const tOk = st&&rt ? Math.abs(st-rt)<=90 : false;    // 시간 ±90초
+        if(!(dOk||tOk)) return;
+        const ds = (sd&&rd)? Math.abs(sd-rd)/Math.max(rd,1) : 1;
+        const ts = (st&&rt)? Math.abs(st-rt)/Math.max(rt,1) : 1;
+        const score = (sd&&rd&&st&&rt) ? (ds+ts)/2 : Math.min(ds,ts);
+        if(score<bestScore){ bestScore=score; best=run; }
+      });
+      if(best){ best.parts.push(sp); best.hasSplits=true; }
+      else { runs.push({ primary:sp, parts:[sp], hasSplits:true }); } // 짝 없는 스플릿 = 독립 기록
     });
 
     let recCount = 0, mergedCount = 0;
-    for(const [,group] of groups){
-      // 같은 날 '완전한 요약'이 2개 이상이고 거리차가 크면 → 서로 다른 러닝: 병합하지 않음
-      const summaries = group.filter(g=>g.p.distanceKm && g.p.durationSec);
-      const sd = summaries.map(g=>g.p.distanceKm);
-      const separate = summaries.length>=2 && (Math.max(...sd)-Math.min(...sd) > 0.8);
-      const subGroups = separate ? group.map(g=>[g]) : [group];
-      for(const sub of subGroups){
-        const rec = mergeImageGroup(sub); const imgs = rec._images; delete rec._images;
-        await DB.put('records', rec);
-        await DB.put('files', { id:rec.id, dataUrl:imgs[0] });
-        for(let i=1;i<imgs.length;i++) await DB.put('files', { id:rec.id+'#'+i, dataUrl:imgs[i] });
-        state.records.push(rec); recCount++; added++;
-        if(sub.length>1) mergedCount++;
-      }
+    for(const run of runs){
+      const ordered = [run.primary, ...run.parts.filter(x=>x!==run.primary)]; // 요약 우선
+      const rec = mergeImageGroup(ordered); const imgs = rec._images; delete rec._images;
+      await DB.put('records', rec);
+      await DB.put('files', { id:rec.id, dataUrl:imgs[0] });
+      for(let i=1;i<imgs.length;i++) await DB.put('files', { id:rec.id+'#'+i, dataUrl:imgs[i] });
+      state.records.push(rec); recCount++; added++;
+      if(run.parts.length>1) mergedCount++;
     }
     state.records.sort((a,b)=>new Date(b.date)-new Date(a.date));
     recompute();                 // 전체 데이터로 훈련 존/학습치 계산
