@@ -6,7 +6,7 @@
 'use strict';
 
 /* 앱 버전 (sw.js 캐시 버전과 동일하게 유지) */
-const APP_VERSION = 'v19';
+const APP_VERSION = 'v20';
 
 /* ---------- 세션 타입 정의 ---------- */
 const TYPES = {
@@ -176,8 +176,8 @@ const state = {
       time: false,           // 경과 시간
       periodicKm: 1,         // N km마다 자동 안내(0=끄기)
       voiceURI: '',          // 선택한 음성(기기별)
-      rate: 0.95,            // 말하기 속도(0.7~1.3, 낮을수록 천천히)
-      pitch: 1.1             // 음높이(0.7~1.4, 높을수록 부드러운 느낌)
+      rate: 0.92,            // 말하기 속도(0.7~1.3, 낮을수록 천천히)
+      pitch: 1.15            // 음높이(0.7~1.4, 높을수록 부드러운 느낌)
     }
   },
   planWeekOffset: 0,
@@ -2140,6 +2140,31 @@ let _voices = [];
 function _loadVoices(){ try{ _voices = window.speechSynthesis ? speechSynthesis.getVoices() : []; }catch(e){} }
 if('speechSynthesis' in window){ _loadVoices(); speechSynthesis.onvoiceschanged = _loadVoices; }
 function koVoices(){ if(!_voices.length) _loadVoices(); return _voices.filter(x=>/^ko/i.test(x.lang)); }
+/* 음성 샘플 10종(여5·남5): 기기에 설치된 한국어 음성 + 음높이/속도 조합으로 톤을 만든다.
+   (기기에 남성/여성 한국어 음성이 여러 개면 자동으로 분산 배정) */
+function voiceSamples(){
+  const ko = koVoices();
+  const base = ko.length ? ko : [null];
+  const pick = (i)=> base[i % base.length];               // 설치된 음성 순환 배정
+  const F = [
+    { label:'여성 1 · 부드럽게', rate:0.92, pitch:1.15 },
+    { label:'여성 2 · 밝고 친근', rate:1.00, pitch:1.28 },
+    { label:'여성 3 · 차분하게', rate:0.88, pitch:1.05 },
+    { label:'여성 4 · 또렷한 코치', rate:1.03, pitch:1.12 },
+    { label:'여성 5 · 나긋하게', rate:0.9,  pitch:1.22 },
+  ];
+  const M = [
+    { label:'남성 1 · 낮고 부드럽게', rate:0.92, pitch:0.82 },
+    { label:'남성 2 · 차분한 저음', rate:0.88, pitch:0.72 },
+    { label:'남성 3 · 또렷한 코치', rate:1.0,  pitch:0.86 },
+    { label:'남성 4 · 편안하게', rate:0.9,  pitch:0.78 },
+    { label:'남성 5 · 활기차게', rate:1.05, pitch:0.9 },
+  ];
+  const out = [];
+  F.forEach((f,i)=> out.push({ ...f, gender:'F', voice: pick(i) }));
+  M.forEach((m,i)=> out.push({ ...m, gender:'M', voice: pick(i) }));
+  return out;
+}
 function speakWith(text, opt){
   if(!('speechSynthesis' in window) || !text) return;
   try{
@@ -2645,13 +2670,17 @@ $('#btnSettings').onclick = ()=>{
       <label class="vchk"><input type="checkbox" id="v_dist" ${vc.distance?'checked':''}> 누적 거리</label>
       <label class="vchk"><input type="checkbox" id="v_time" ${vc.time?'checked':''}> 경과 시간</label>
     </div>
-    <label class="f" style="margin-top:12px">안내 음성 <span style="color:var(--sub);font-weight:400">· 골라서 미리듣기</span></label>
+    <label class="f" style="margin-top:12px">음성 샘플 · 눌러서 들어보고 선택</label>
+    <div id="v_samples" class="vsamp"></div>
+    <div class="note" style="margin-top:6px">여성 5종·남성 5종을 눌러 들어보고 마음에 드는 걸 고르세요(선택하면 아래 값에 자동 반영). 더 자연스러운 목소리는 iPhone <b>설정 → 손쉬운 사용 → 콘텐츠 말하기 → 음성 → 한국어</b>에서 '유나(고급)' 등을 받으면 샘플이 더 다양해집니다.</div>
+
+    <label class="f" style="margin-top:12px">안내 음성 <span style="color:var(--sub);font-weight:400">· 직접 조절</span></label>
     <select id="v_voice"></select>
     <div class="inline" style="margin-top:8px">
       <div><label class="f" style="margin-top:0">속도 <span id="v_rate_l" style="color:var(--acc)"></span></label>
-        <input type="range" id="v_rate" min="0.7" max="1.3" step="0.05" value="${vc.rate!=null?vc.rate:0.95}"></div>
+        <input type="range" id="v_rate" min="0.7" max="1.3" step="0.05" value="${vc.rate!=null?vc.rate:0.92}"></div>
       <div><label class="f" style="margin-top:0">음높이 <span id="v_pitch_l" style="color:var(--acc)"></span></label>
-        <input type="range" id="v_pitch" min="0.7" max="1.4" step="0.05" value="${vc.pitch!=null?vc.pitch:1.1}"></div>
+        <input type="range" id="v_pitch" min="0.7" max="1.4" step="0.05" value="${vc.pitch!=null?vc.pitch:1.15}"></div>
     </div>
     <button class="btn block sm" id="v_test" style="margin-top:10px">🔊 이 목소리로 미리듣기</button>
     <div class="note" style="margin-top:6px">목소리가 딱딱하거나 무섭게 들리면 <b>음높이를 조금 올리고 속도를 살짝 낮춰</b> 보세요. 더 자연스러운 한국어 음성은 iPhone <b>설정 → 손쉬운 사용 → 콘텐츠 말하기 → 음성 → 한국어</b>에서 '유나(고급/프리미엄)' 등을 내려받으면 이 목록에 추가됩니다.</div>
@@ -2681,17 +2710,31 @@ $('#btnSettings').onclick = ()=>{
     sel.innerHTML = ko.map(v=>`<option value="${v.voiceURI}" ${vc.voiceURI===v.voiceURI?'selected':''}>${v.name}</option>`).join('');
     if(vc.voiceURI && ko.some(v=>v.voiceURI===vc.voiceURI)) sel.value = vc.voiceURI;
   };
-  fillVoices();
-  if('speechSynthesis' in window){ speechSynthesis.onvoiceschanged = ()=>{ _loadVoices(); fillVoices(); }; }
-
   // 슬라이더 값 라벨
   const rL=$('#v_rate_l'), pL=$('#v_pitch_l'), rI=$('#v_rate'), pI=$('#v_pitch');
   const syncLabels = ()=>{ if(rL) rL.textContent=(+rI.value).toFixed(2)+'x'; if(pL) pL.textContent=(+pI.value).toFixed(2); };
   if(rI) rI.oninput = syncLabels; if(pI) pI.oninput = syncLabels; syncLabels();
 
+  const SAMPLE = '1킬로미터 지점, 페이스 5분 30초, 케이던스 178';
+  // 샘플 10종 렌더 (들어보고 선택 → 아래 컨트롤에 반영)
+  const renderSamples = ()=>{
+    const box=$('#v_samples'); if(!box) return;
+    state._vsamples = voiceSamples();
+    box.innerHTML = state._vsamples.map((s,i)=>
+      `<button type="button" class="vsampbtn" data-i="${i}">${s.gender==='M'?'👨':'👩'} ${s.label}</button>`).join('');
+    box.querySelectorAll('.vsampbtn').forEach(b=> b.onclick=()=>{
+      const s = state._vsamples[+b.dataset.i];
+      if($('#v_voice') && s.voice) $('#v_voice').value = s.voice.voiceURI;
+      if(rI) rI.value = s.rate; if(pI) pI.value = s.pitch; syncLabels();
+      box.querySelectorAll('.vsampbtn').forEach(x=>x.classList.remove('on')); b.classList.add('on');
+      speakWith(SAMPLE, { voiceURI:s.voice?s.voice.voiceURI:'', rate:s.rate, pitch:s.pitch });
+    });
+  };
+  fillVoices(); renderSamples();
+  if('speechSynthesis' in window){ speechSynthesis.onvoiceschanged = ()=>{ _loadVoices(); fillVoices(); renderSamples(); }; }
+
   $('#v_test').onclick=()=>{
-    speakWith('안녕하세요. 반복 2 완료. 구간 페이스 5분 30초. 다음 단계, 회복 조깅.',
-      { voiceURI:$('#v_voice').value, rate:parseFloat($('#v_rate').value)||1, pitch:parseFloat($('#v_pitch').value)||1 });
+    speakWith(SAMPLE, { voiceURI:$('#v_voice').value, rate:parseFloat($('#v_rate').value)||1, pitch:parseFloat($('#v_pitch').value)||1 });
   };
   $('#set_save').onclick=()=>{
     state.settings.targetRace=$('#set_race').value;
