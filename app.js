@@ -6,7 +6,7 @@
 'use strict';
 
 /* 앱 버전 (sw.js 캐시 버전과 동일하게 유지) */
-const APP_VERSION = 'v20';
+const APP_VERSION = 'v21';
 
 /* ---------- 세션 타입 정의 ---------- */
 const TYPES = {
@@ -233,7 +233,7 @@ function openSheet(html){
   $('#sheetBody').innerHTML = html;
   $('#modal').classList.add('open');
 }
-function closeSheet(){ $('#modal').classList.remove('open'); }
+function closeSheet(){ $('#modal').classList.remove('open'); if('speechSynthesis' in window) speechSynthesis.cancel(); }
 $('#modal').addEventListener('click', (e)=>{ if(e.target.id==='modal') closeSheet(); });
 
 /* ---------- 라우터 ---------- */
@@ -688,12 +688,12 @@ function mergeImageGroup(group){
    신뢰도 높은 신호는 하드 게이트: 하나라도 크게 어긋나면 즉시 배제(Infinity).
    sp=스플릿쪽 프로필, sm=요약쪽 프로필 */
 function matchCost(sp, sm){
-  // ── 하드 게이트: 같은 러닝이라면 반드시 통과해야 하는 조건 ──
-  if(sp.dist!=null && sm.dist!=null && Math.abs(sp.dist-sm.dist) > 0.5) return Infinity;         // 거리 0.5km↑ 차 → 다른 러닝
-  if(sp.time!=null && sm.time!=null && Math.abs(sp.time-sm.time) > 75)  return Infinity;         // 총시간 75초↑ 차
-  if(sp.rows   && sm.dist!=null && Math.abs(sp.rows-Math.ceil(sm.dist)) > 2) return Infinity;    // 구간 수 ≠ 거리
-  if(sp.pace!=null && sm.pace!=null && Math.abs(sp.pace-sm.pace) > 45)  return Infinity;         // 평균 페이스 45초/km↑ 차
-  if(sp.hr!=null   && sm.hr!=null   && Math.abs(sp.hr-sm.hr)   > 18)    return Infinity;         // 평균 심박 18bpm↑ 차
+  // ── 하드 게이트: 같은 러닝이라면 반드시 통과해야 하는 조건 (정확도 우선으로 강화) ──
+  if(sp.dist!=null && sm.dist!=null && Math.abs(sp.dist-sm.dist) > 0.3) return Infinity;         // 거리 0.3km↑ 차 → 다른 러닝
+  if(sp.time!=null && sm.time!=null && Math.abs(sp.time-sm.time) > 45)  return Infinity;         // 총시간 45초↑ 차
+  if(sp.rows   && sm.dist!=null && Math.abs(sp.rows-Math.ceil(sm.dist)) > 1) return Infinity;    // 구간 수 ≠ 거리
+  if(sp.pace!=null && sm.pace!=null && Math.abs(sp.pace-sm.pace) > 30)  return Infinity;         // 평균 페이스 30초/km↑ 차
+  if(sp.hr!=null   && sm.hr!=null   && Math.abs(sp.hr-sm.hr)   > 12)    return Infinity;         // 평균 심박 12bpm↑ 차
 
   // ── 확증: 비교 가능한 '강한 신호'(거리/시간/구간수)가 최소 하나는 있어야 매칭 ──
   const strongCmp = (sp.dist!=null&&sm.dist!=null) || (sp.time!=null&&sm.time!=null) || (sp.rows&&sm.dist!=null);
@@ -720,16 +720,22 @@ function recProfile(r){
    p=이미지 프로필(p객체), g=그룹 대표. 하나라도 어긋나면 false, 강한 신호(거리/시간)가 일치하면 true. */
 function sameRun(p, g){
   const d=p.distanceKm, t=p.durationSec, pc=p.avgPaceSec, h=p.avgHr, c=p.cadence;
-  if(d!=null  && g.dist!=null && Math.abs(d - g.dist) > 0.3) return false;   // 거리 동일해야
-  if(t!=null  && g.time!=null && Math.abs(t - g.time) > 30)  return false;   // 총시간 동일해야
-  if(pc!=null && g.pace!=null && Math.abs(pc- g.pace) > 12)  return false;   // 평균 페이스 동일
-  if(h!=null  && g.hr!=null   && Math.abs(h - g.hr)   > 8)   return false;   // 평균 심박 동일
-  if(c!=null  && g.cad!=null  && Math.abs(c - g.cad)  > 6)   return false;   // 평균 케이던스 동일
-  const dMatch = d!=null  && g.dist!=null && Math.abs(d - g.dist) <= 0.3;
-  const tMatch = t!=null  && g.time!=null && Math.abs(t - g.time) <= 30;
-  const pMatch = pc!=null && g.pace!=null && Math.abs(pc- g.pace) <= 12;
-  const hMatch = h!=null  && g.hr!=null   && Math.abs(h - g.hr)   <= 8;
-  return dMatch || tMatch || (pMatch && hMatch);   // 거리/시간 일치, 또는 페이스+심박 동시 일치
+  // ── 하드 조건: 하나라도 어긋나면 즉시 다른 러닝 (오차 범위 축소로 정확도↑) ──
+  if(d!=null  && g.dist!=null && Math.abs(d - g.dist) > 0.2) return false;   // 거리 0.2km 이내여야
+  if(t!=null  && g.time!=null && Math.abs(t - g.time) > 25)  return false;   // 총시간 25초 이내여야
+  if(pc!=null && g.pace!=null && Math.abs(pc- g.pace) > 10)  return false;   // 평균 페이스 10초/km 이내
+  if(h!=null  && g.hr!=null   && Math.abs(h - g.hr)   > 7)   return false;   // 평균 심박 7bpm 이내
+  if(c!=null  && g.cad!=null  && Math.abs(c - g.cad)  > 5)   return false;   // 평균 케이던스 5spm 이내
+  const dMatch = d!=null  && g.dist!=null && Math.abs(d - g.dist) <= 0.2;
+  const tMatch = t!=null  && g.time!=null && Math.abs(t - g.time) <= 25;
+  const pMatch = pc!=null && g.pace!=null && Math.abs(pc- g.pace) <= 10;
+  const hMatch = h!=null  && g.hr!=null   && Math.abs(h - g.hr)   <= 7;
+  // ── 확증: 독립 신호 2개 이상 일치해야 매칭(단일 우연 일치 방지) ──
+  if(dMatch && tMatch) return true;               // 거리+시간 → 확실
+  if(dMatch && (pMatch||hMatch)) return true;      // 거리+페이스/심박
+  if(tMatch && pMatch && hMatch) return true;      // 시간+페이스+심박
+  if(dMatch && t==null && pc==null && h==null) return true; // 거리만 읽힌 스플릿(다른 신호 없음)
+  return false;
 }
 /* OCR이 '명백히 다른 러닝'이라고 반박하는가 (미사용 · 참고용) */
 function contradicts(sp, sm){
@@ -784,7 +790,7 @@ function findMergeTarget(item, maxCost){
     const c = item.isSplit ? matchCost(prof, ep) : matchCost(ep, prof);
     if(c<bestC){ bestC=c; best=ex; }
   }
-  return (bestC <= (maxCost!=null?maxCost:2.0)) ? best : null;
+  return (bestC <= (maxCost!=null?maxCost:1.4)) ? best : null;
 }
 
 /* 기존 기록에 이미지 한 장을 추가하고 수치를 합침 */
@@ -2139,7 +2145,8 @@ const run = {
 let _voices = [];
 function _loadVoices(){ try{ _voices = window.speechSynthesis ? speechSynthesis.getVoices() : []; }catch(e){} }
 if('speechSynthesis' in window){ _loadVoices(); speechSynthesis.onvoiceschanged = _loadVoices; }
-function koVoices(){ if(!_voices.length) _loadVoices(); return _voices.filter(x=>/^ko/i.test(x.lang)); }
+function koVoices(){ if(!_voices.length) _loadVoices();
+  return _voices.filter(x=>/^ko/i.test(x.lang) && !/microsoft/i.test(x.name||'')); }
 /* 음성 샘플 10종(여5·남5): 기기에 설치된 한국어 음성 + 음높이/속도 조합으로 톤을 만든다.
    (기기에 남성/여성 한국어 음성이 여러 개면 자동으로 분산 배정) */
 function voiceSamples(){
@@ -2168,6 +2175,7 @@ function voiceSamples(){
 function speakWith(text, opt){
   if(!('speechSynthesis' in window) || !text) return;
   try{
+    speechSynthesis.cancel();   // 재생 중이던 음성 즉시 중지 후 새 음성 시작
     const u = new SpeechSynthesisUtterance(text);
     u.lang = 'ko-KR';
     u.rate = (opt && opt.rate) || 1.0;
@@ -2176,7 +2184,7 @@ function speakWith(text, opt){
     let voice = null;
     const uri = opt && opt.voiceURI;
     if(uri) voice = _voices.find(x=>x.voiceURI===uri);
-    if(!voice) voice = _voices.find(x=>/^ko/i.test(x.lang));
+    if(!voice) voice = koVoices()[0] || _voices.find(x=>/^ko/i.test(x.lang));
     if(voice) u.voice = voice;
     speechSynthesis.speak(u);
   }catch(e){}
@@ -2737,6 +2745,7 @@ $('#btnSettings').onclick = ()=>{
     speakWith(SAMPLE, { voiceURI:$('#v_voice').value, rate:parseFloat($('#v_rate').value)||1, pitch:parseFloat($('#v_pitch').value)||1 });
   };
   $('#set_save').onclick=()=>{
+    if('speechSynthesis' in window) speechSynthesis.cancel();  // 미리듣기 재생 중이면 중지
     state.settings.targetRace=$('#set_race').value;
     state.settings.weeklyGoalKm=parseInt($('#set_goal').value)||40;
     state.settings.weightKg=parseInt($('#set_wt').value)||65;
