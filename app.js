@@ -6,7 +6,7 @@
 'use strict';
 
 /* 앱 버전 (sw.js 캐시 버전과 동일하게 유지) */
-const APP_VERSION = 'v18';
+const APP_VERSION = 'v19';
 
 /* ---------- 세션 타입 정의 ---------- */
 const TYPES = {
@@ -174,7 +174,10 @@ const state = {
       hr: false,             // 심박(센서 연결 시)
       distance: true,        // 누적 거리
       time: false,           // 경과 시간
-      periodicKm: 1          // N km마다 자동 안내(0=끄기)
+      periodicKm: 1,         // N km마다 자동 안내(0=끄기)
+      voiceURI: '',          // 선택한 음성(기기별)
+      rate: 0.95,            // 말하기 속도(0.7~1.3, 낮을수록 천천히)
+      pitch: 1.1             // 음높이(0.7~1.4, 높을수록 부드러운 느낌)
     }
   },
   planWeekOffset: 0,
@@ -2136,15 +2139,27 @@ const run = {
 let _voices = [];
 function _loadVoices(){ try{ _voices = window.speechSynthesis ? speechSynthesis.getVoices() : []; }catch(e){} }
 if('speechSynthesis' in window){ _loadVoices(); speechSynthesis.onvoiceschanged = _loadVoices; }
-function speak(text){
-  const v = state.settings.voice;
-  if(!v || !v.enabled || !('speechSynthesis' in window) || !text) return;
+function koVoices(){ if(!_voices.length) _loadVoices(); return _voices.filter(x=>/^ko/i.test(x.lang)); }
+function speakWith(text, opt){
+  if(!('speechSynthesis' in window) || !text) return;
   try{
     const u = new SpeechSynthesisUtterance(text);
-    u.lang = 'ko-KR'; u.rate = 1.02; u.pitch = 1.0; u.volume = 1.0;
-    const ko = _voices.find(x=>/ko/i.test(x.lang)); if(ko) u.voice = ko;
+    u.lang = 'ko-KR';
+    u.rate = (opt && opt.rate) || 1.0;
+    u.pitch = (opt && opt.pitch!=null) ? opt.pitch : 1.0;
+    u.volume = 1.0;
+    let voice = null;
+    const uri = opt && opt.voiceURI;
+    if(uri) voice = _voices.find(x=>x.voiceURI===uri);
+    if(!voice) voice = _voices.find(x=>/^ko/i.test(x.lang));
+    if(voice) u.voice = voice;
     speechSynthesis.speak(u);
   }catch(e){}
+}
+function speak(text){
+  const v = state.settings.voice;
+  if(!v || !v.enabled) return;
+  speakWith(text, { voiceURI:v.voiceURI, rate:v.rate||1.0, pitch:v.pitch!=null?v.pitch:1.0 });
 }
 function paceKor(sec){ if(!sec||!isFinite(sec)) return ''; const m=Math.floor(sec/60), s=Math.round(sec%60);
   return s? `${m}분 ${s}초` : `${m}분`; }
@@ -2630,14 +2645,24 @@ $('#btnSettings').onclick = ()=>{
       <label class="vchk"><input type="checkbox" id="v_dist" ${vc.distance?'checked':''}> 누적 거리</label>
       <label class="vchk"><input type="checkbox" id="v_time" ${vc.time?'checked':''}> 경과 시간</label>
     </div>
-    <label class="f" style="margin-top:10px">자동 안내 주기</label>
+    <label class="f" style="margin-top:12px">안내 음성 <span style="color:var(--sub);font-weight:400">· 골라서 미리듣기</span></label>
+    <select id="v_voice"></select>
+    <div class="inline" style="margin-top:8px">
+      <div><label class="f" style="margin-top:0">속도 <span id="v_rate_l" style="color:var(--acc)"></span></label>
+        <input type="range" id="v_rate" min="0.7" max="1.3" step="0.05" value="${vc.rate!=null?vc.rate:0.95}"></div>
+      <div><label class="f" style="margin-top:0">음높이 <span id="v_pitch_l" style="color:var(--acc)"></span></label>
+        <input type="range" id="v_pitch" min="0.7" max="1.4" step="0.05" value="${vc.pitch!=null?vc.pitch:1.1}"></div>
+    </div>
+    <button class="btn block sm" id="v_test" style="margin-top:10px">🔊 이 목소리로 미리듣기</button>
+    <div class="note" style="margin-top:6px">목소리가 딱딱하거나 무섭게 들리면 <b>음높이를 조금 올리고 속도를 살짝 낮춰</b> 보세요. 더 자연스러운 한국어 음성은 iPhone <b>설정 → 손쉬운 사용 → 콘텐츠 말하기 → 음성 → 한국어</b>에서 '유나(고급/프리미엄)' 등을 내려받으면 이 목록에 추가됩니다.</div>
+
+    <label class="f" style="margin-top:12px">자동 안내 주기</label>
     <select id="v_period">
       <option value="0" ${vc.periodicKm===0?'selected':''}>끄기 (단계 전환 때만)</option>
       <option value="0.5" ${vc.periodicKm===0.5?'selected':''}>0.5km 마다</option>
       <option value="1" ${vc.periodicKm===1?'selected':''}>1km 마다</option>
       <option value="2" ${vc.periodicKm===2?'selected':''}>2km 마다</option>
     </select>
-    <button class="btn block sm" id="v_test" style="margin-top:10px">🔊 음성 미리듣기</button>
 
     <div class="hr"></div>
     <button class="btn block" id="set_shoes">👟 러닝화 관리</button>
@@ -2647,11 +2672,26 @@ $('#btnSettings').onclick = ()=>{
     <div style="text-align:center;font-size:12px;color:var(--mut);margin-top:14px">런코치 · 버전 ${APP_VERSION}</div>
   `);
   $('#set_shoes').onclick=()=>{ closeSheet(); go('shoes'); };
+
+  // 음성 목록 채우기 (기기별) — 한국어 우선
+  const fillVoices = ()=>{
+    const sel = $('#v_voice'); if(!sel) return;
+    const ko = koVoices();
+    if(!ko.length){ sel.innerHTML = '<option value="">기본 음성 (한국어 음성 없음 · 아래 안내 참고)</option>'; return; }
+    sel.innerHTML = ko.map(v=>`<option value="${v.voiceURI}" ${vc.voiceURI===v.voiceURI?'selected':''}>${v.name}</option>`).join('');
+    if(vc.voiceURI && ko.some(v=>v.voiceURI===vc.voiceURI)) sel.value = vc.voiceURI;
+  };
+  fillVoices();
+  if('speechSynthesis' in window){ speechSynthesis.onvoiceschanged = ()=>{ _loadVoices(); fillVoices(); }; }
+
+  // 슬라이더 값 라벨
+  const rL=$('#v_rate_l'), pL=$('#v_pitch_l'), rI=$('#v_rate'), pI=$('#v_pitch');
+  const syncLabels = ()=>{ if(rL) rL.textContent=(+rI.value).toFixed(2)+'x'; if(pL) pL.textContent=(+pI.value).toFixed(2); };
+  if(rI) rI.oninput = syncLabels; if(pI) pI.oninput = syncLabels; syncLabels();
+
   $('#v_test').onclick=()=>{
-    const prev = state.settings.voice ? state.settings.voice.enabled : true;
-    if(state.settings.voice) state.settings.voice.enabled = $('#v_enabled').checked;
-    speak('페이스 5분 30초, 케이던스 178, 거리 2.5 킬로미터');
-    if(state.settings.voice) state.settings.voice.enabled = prev;
+    speakWith('안녕하세요. 반복 2 완료. 구간 페이스 5분 30초. 다음 단계, 회복 조깅.',
+      { voiceURI:$('#v_voice').value, rate:parseFloat($('#v_rate').value)||1, pitch:parseFloat($('#v_pitch').value)||1 });
   };
   $('#set_save').onclick=()=>{
     state.settings.targetRace=$('#set_race').value;
@@ -2668,7 +2708,10 @@ $('#btnSettings').onclick = ()=>{
       enabled: $('#v_enabled').checked,
       pace: $('#v_pace').checked, lapPace: $('#v_lap').checked, cadence: $('#v_cad').checked,
       hr: $('#v_hr').checked, distance: $('#v_dist').checked, time: $('#v_time').checked,
-      periodicKm: parseFloat($('#v_period').value)
+      periodicKm: parseFloat($('#v_period').value),
+      voiceURI: $('#v_voice').value || '',
+      rate: parseFloat($('#v_rate').value)||0.95,
+      pitch: parseFloat($('#v_pitch').value)||1.1
     };
     localStorage.setItem('rc_settings',JSON.stringify(state.settings));
     // 스타일이 바뀌었으면 이번 주 플랜 재생성
