@@ -6,7 +6,7 @@
 'use strict';
 
 /* 앱 버전 (sw.js 캐시 버전과 동일하게 유지) */
-const APP_VERSION = 'v21';
+const APP_VERSION = 'v22';
 
 /* ---------- 세션 타입 정의 ---------- */
 const TYPES = {
@@ -2132,6 +2132,130 @@ $('#btnStyleNsm').onclick = ()=> setPlanStyle('nsm');
 $('#btnStyleMixed').onclick = ()=> setPlanStyle('mixed');
 
 /* ============================================================
+   러닝 맵 (Leaflet + OSM) · 날씨 (Open-Meteo)
+   ============================================================ */
+let _leafletLoading;
+const runMapState = {
+  map:null, marker:null, poly:null, ready:false,
+  wxAt:0, wxKey:''
+};
+function ensureLeaflet(){
+  if(window.L) return Promise.resolve();
+  if(_leafletLoading) return _leafletLoading;
+  _leafletLoading = new Promise((res, rej)=>{
+    if(!document.querySelector('link[data-leaflet]')){
+      const link = document.createElement('link');
+      link.rel = 'stylesheet';
+      link.href = 'https://unpkg.com/leaflet@1.9.4/dist/leaflet.css';
+      link.dataset.leaflet = '1';
+      document.head.appendChild(link);
+    }
+    const s = document.createElement('script');
+    s.src = 'https://unpkg.com/leaflet@1.9.4/dist/leaflet.js';
+    s.onload = ()=>res();
+    s.onerror = ()=>rej(new Error('지도 로드 실패'));
+    document.head.appendChild(s);
+  });
+  return _leafletLoading;
+}
+function wmoLabel(code){
+  const c = +code;
+  if(c===0) return '맑음';
+  if(c<=3) return '구름';
+  if(c<=48) return '안개';
+  if(c<=57) return '이슬비';
+  if(c<=67) return '비';
+  if(c<=77) return '눈';
+  if(c<=82) return '소나기';
+  if(c<=86) return '눈소나기';
+  if(c<=99) return '뇌우';
+  return '날씨';
+}
+async function fetchWeather(lat, lon){
+  const el = $('#runWx'); if(!el) return;
+  const key = lat.toFixed(2)+','+lon.toFixed(2);
+  if(runMapState.wxKey===key && Date.now()-runMapState.wxAt < 10*60*1000) return;
+  try{
+    const url = `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}&current=temperature_2m,relative_humidity_2m,apparent_temperature,wind_speed_10m,weather_code&timezone=auto&wind_speed_unit=ms`;
+    const r = await fetch(url);
+    if(!r.ok) throw new Error('wx');
+    const j = await r.json();
+    const c = j.current; if(!c) throw new Error('wx');
+    runMapState.wxKey = key; runMapState.wxAt = Date.now();
+    el.innerHTML = `<b>${Math.round(c.temperature_2m)}°</b> ${wmoLabel(c.weather_code)} · 습도 ${Math.round(c.relative_humidity_2m)}% · 체감 ${Math.round(c.apparent_temperature)}° · 풍속 ${(+c.wind_speed_10m).toFixed(1)}m/s`;
+  }catch(e){
+    if(!runMapState.wxKey) el.textContent = '날씨 정보를 불러오지 못했어요';
+  }
+}
+function updateRunMarker(lat, lon, center){
+  if(!runMapState.ready) return;
+  runMapState.marker.setLatLng([lat, lon]);
+  if(center) runMapState.map.setView([lat, lon], Math.max(runMapState.map.getZoom(), 15));
+}
+function updateRunPolyline(){
+  if(!runMapState.ready || !run.path.length) return;
+  runMapState.poly.setLatLngs(run.path);
+  const last = run.path[run.path.length-1];
+  updateRunMarker(last[0], last[1], true);
+}
+function clearRunPolyline(){
+  if(runMapState.poly) runMapState.poly.setLatLngs([]);
+}
+function downsamplePath(path, maxPts){
+  if(!path || !path.length) return [];
+  if(path.length<=maxPts) return path.slice();
+  const step = Math.ceil(path.length / maxPts);
+  const out = [];
+  for(let i=0;i<path.length;i+=step) out.push(path[i]);
+  const last = path[path.length-1];
+  const prev = out[out.length-1];
+  if(!prev || prev[0]!==last[0] || prev[1]!==last[1]) out.push(last);
+  return out;
+}
+async function initRunMap(){
+  const box = $('#runMap'); if(!box) return;
+  try{ await ensureLeaflet(); }
+  catch(e){
+    box.innerHTML = '<div style="padding:24px;text-align:center;color:var(--sub);font-size:12px">지도를 불러오지 못했어요</div>';
+    return;
+  }
+  if(!runMapState.map){
+    box.innerHTML = '';
+    runMapState.map = L.map(box, { zoomControl:true }).setView([37.5665, 126.978], 14);
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      maxZoom:19,
+      attribution:'&copy; <a href="https://www.openstreetmap.org/copyright">OSM</a>'
+    }).addTo(runMapState.map);
+    runMapState.marker = L.circleMarker([37.5665, 126.978], {
+      radius:8, color:'#ff6a3d', fillColor:'#ff6a3d', fillOpacity:0.95, weight:2
+    }).addTo(runMapState.map);
+    runMapState.poly = L.polyline([], { color:'#4aa8ff', weight:4, opacity:0.9 }).addTo(runMapState.map);
+    runMapState.ready = true;
+  }
+  setTimeout(()=>{ try{ runMapState.map.invalidateSize(); }catch(e){} }, 120);
+  if(run.active && run.path.length){
+    updateRunPolyline();
+    return;
+  }
+  if(!('geolocation' in navigator)){
+    const el=$('#runWx'); if(el) el.textContent='이 기기에서 위치를 사용할 수 없어요';
+    return;
+  }
+  navigator.geolocation.getCurrentPosition(async (pos)=>{
+    const lat = pos.coords.latitude, lon = pos.coords.longitude;
+    updateRunMarker(lat, lon, true);
+    await fetchWeather(lat, lon);
+    if(!run.active){
+      if(pos.coords.accuracy<=35) setGps('ok','GPS 양호');
+      else setGps('weak','GPS 정확도 낮음');
+    }
+  }, ()=>{
+    const el=$('#runWx');
+    if(el && !runMapState.wxKey) el.textContent='위치 권한이 필요해요';
+  }, { enableHighAccuracy:true, maximumAge:30000, timeout:15000 });
+}
+
+/* ============================================================
    실시간 러닝 (GPS + 동작센서 케이던스)
    ============================================================ */
 const run = {
@@ -2256,6 +2380,7 @@ function renderRunTab(){
     else { const it=state._runWorkouts[+v]; state.loadedWorkout=JSON.parse(JSON.stringify(it.wo)); state.loadedWorkoutType=it.type; if($('#runType')) $('#runType').value=it.type||'easy'; }
   };
   if(state.loadedWorkoutType && $('#runType')) $('#runType').value = state.loadedWorkoutType;
+  initRunMap();
 }
 
 async function startRun(){
@@ -2266,6 +2391,7 @@ async function startRun(){
   }
   run.active=true; run.paused=false; run.startTs=Date.now(); run.elapsed=0; run.dist=0;
   run.lastPos=null; run.steps=0; run.cadWindow=[]; run.path=[];
+  clearRunPolyline();
   // 워크아웃 적재
   run.workout = state.loadedWorkout ? JSON.parse(JSON.stringify(state.loadedWorkout)) : null;
   run.stepIdx = 0; run.stepBaseElapsed = 0; run.stepBaseDist = 0; run.lastPeriodicKm = 0;
@@ -2321,6 +2447,8 @@ function onPos(pos){
     }
   }
   run.lastPos = p; run.path.push([p.lat,p.lon]);
+  updateRunPolyline();
+  fetchWeather(p.lat, p.lon);
 }
 function onPosErr(){ setGps('weak','GPS 신호 대기'); }
 function setGps(cls,txt){ const d=$('#gpsDot'); d.className='gpsdot '+(cls==='ok'?'ok':'weak'); $('#gpsText').textContent=txt; }
@@ -2444,7 +2572,8 @@ async function stopRun(){
     id:uid(), date:new Date().toISOString(), source:'live',
     type:$('#runType').value, distanceKm:km, durationSec:dur,
     avgPaceSec: km>0? dur/km : null, cadence: cad, shoeId:$('#runShoe').value||null,
-    notes:'실시간 측정'
+    notes:'실시간 측정',
+    path: downsamplePath(run.path, 2000)
   };
   await DB.put('records', rec);
   state.records.unshift(rec);
@@ -2462,7 +2591,8 @@ function resetLive(){
   $('#livePace').textContent='--:--'; $('#liveTime').textContent='00:00';
   $('#liveDist').textContent='0.00'; $('#liveCad').textContent='--'; $('#liveAvg').textContent='--:--';
   setGps('','GPS 대기중');
-  run.workout=null; run._lastCd=undefined;
+  run.workout=null; run._lastCd=undefined; run.path=[];
+  clearRunPolyline();
   const wa=$('#woActive'); if(wa) wa.style.display='none';
   const wp=$('#woPick'); if(wp) wp.style.display='block';
   renderRunTab();

@@ -153,6 +153,12 @@ textarea{min-height:90px;resize:vertical}
 .gpsdot{display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--mut);margin-right:5px}
 .gpsdot.ok{background:var(--ok);box-shadow:0 0 8px var(--ok)}
 .gpsdot.weak{background:var(--warn)}
+.run-wx{margin-top:10px;font-size:12px;color:var(--sub);line-height:1.45}
+.run-wx b{color:var(--txt);font-size:14px;font-weight:800;margin-right:4px}
+#runMap{height:200px;margin-top:10px;border-radius:14px;overflow:hidden;border:1px solid var(--line);background:var(--bg2);z-index:0}
+#runMap .leaflet-container{height:100%;background:var(--bg2);font:inherit}
+#runMap .leaflet-control-attribution{font-size:9px;background:rgba(11,15,20,.75);color:var(--mut)}
+#runMap .leaflet-control-attribution a{color:var(--blue)}
 
 /* 하단 탭바 */
 nav.tabbar{position:fixed;bottom:0;left:0;right:0;z-index:40;display:flex;
@@ -305,6 +311,8 @@ canvas.chart{width:100%;height:150px;display:block}
           <option value="nsm">NSM</option><option value="recovery">리커버리</option>
         </select>
       </div>
+      <div class="run-wx" id="runWx">날씨 로딩…</div>
+      <div id="runMap" aria-label="현재 위치 지도"></div>
 
       <div id="woPick" style="margin-top:12px">
         <label class="f">워크아웃 (선택)</label>
