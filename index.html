@@ -279,14 +279,14 @@ canvas.chart{width:100%;height:150px;display:block}
     </div>
     <div class="card">
       <h2>러닝 기록 첨부 & 학습</h2>
-      <div class="desc">스크린샷(이미지)·txt·GPX/TCX 파일 또는 직접 입력으로 기록을 추가하면, 앱이 이를 분석해 체력과 플랜에 반영합니다.</div>
+      <div class="desc">Amazfit Active 3(Zepp) <b>GPX · TCX · FIT</b>, 스크린샷, txt 또는 직접 입력으로 기록을 추가하면 체력·플랜에 반영합니다.</div>
       <div class="grid2">
         <button class="btn" id="btnAddFile">📎 파일 첨부</button>
         <button class="btn" id="btnAddManual">✏️ 직접 입력</button>
       </div>
-      <input type="file" id="fileInput" accept="image/*,.txt,.csv,.gpx,.tcx" multiple class="hidden" />
+      <input type="file" id="fileInput" accept="image/*,.txt,.csv,.gpx,.tcx,.fit,application/gpx+xml,application/vnd.garmin.tcx+xml" multiple class="hidden" />
       <button class="btn block" id="btnOcrAll" style="margin-top:10px">🔍 첨부 이미지에서 수치 자동 인식</button>
-      <div class="note"><b>여러 장을 한 번에 올려도 됩니다.</b> 같은 러닝의 스크린샷(요약 화면 + 스플릿 화면 등)은 <b>날짜 기준으로 하나의 기록으로 자동 병합·정리</b>되고, 거리·시간·페이스·심박·케이던스·<b>날짜</b>가 자동으로 채워집니다. 애플 피트니스·Strava·Garmin 캡처를 인식하며, 첫 실행 때만 인식 엔진을 잠시 내려받습니다(20~40초). 위 <b>🔍 버튼</b>은 이미 올렸지만 수치가 비어 있는 이미지를 다시 인식할 때 쓰세요. 인식이 애매하면 기록을 탭해 직접 보정할 수 있고, 파일은 기기 내부(IndexedDB)에만 저장됩니다.</div>
+      <div class="note"><b>워치 기록:</b> Zepp 앱 → 운동 기록 → ⋮ → 데이터 내보내기 → GPX/TCX/FIT 후 여기에 첨부하세요. 거리·시간·페이스·심박·케이던스를 자동으로 읽습니다. <b>스크린샷 여러 장</b>도 한 번에 올릴 수 있고 같은 러닝은 자동 병합됩니다. 수치가 비면 기록을 탭해 보정하세요. 파일은 기기 내부(IndexedDB)에만 저장됩니다.</div>
     </div>
     <div style="display:flex;justify-content:space-between;align-items:center;margin:4px 2px 10px">
       <div class="sectitle" style="margin:0">기록 목록 <span id="recCount" style="color:var(--acc)"></span></div>

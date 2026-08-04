@@ -6,7 +6,7 @@
 'use strict';
 
 /* 앱 버전 (sw.js 캐시 버전과 동일하게 유지) */
-const APP_VERSION = 'v22';
+const APP_VERSION = 'v23';
 
 /* ---------- 세션 타입 정의 ---------- */
 const TYPES = {
@@ -577,68 +577,364 @@ async function ocrAllImages(){
   toast(ok? `인식 완료 · ${ok}/${targets.length}개 반영 (거리·페이스·심박·케이던스·날짜)` : '수치를 찾지 못했어요 · 스크린샷이 선명한지 확인 후 재시도');
 }
 
-/* GPX 파싱 */
-function parseGPX(xmlText){
-  const doc = new DOMParser().parseFromString(xmlText, 'application/xml');
-  const pts = Array.from(doc.getElementsByTagName('trkpt')).map(p=>({
-    lat:+p.getAttribute('lat'), lon:+p.getAttribute('lon'),
-    time: p.getElementsByTagName('time')[0]?.textContent
-  }));
-  if(pts.length<2) return null;
-  let dist=0; for(let i=1;i<pts.length;i++) dist+=haversine(pts[i-1],pts[i]);
-  const t0=pts.find(p=>p.time)?.time, t1=[...pts].reverse().find(p=>p.time)?.time;
-  const dur = (t0&&t1) ? (new Date(t1)-new Date(t0))/1000 : null;
-  const km = dist/1000;
-  return { distanceKm:+km.toFixed(2), durationSec:dur?Math.round(dur):null,
-           avgPaceSec: dur&&km ? dur/km : null, date: t0||new Date().toISOString() };
+/* GPX / TCX / FIT 파싱 (Amazfit Active 3 · Zepp 내보내기 대응) */
+function xmlLocalAll(root, name){
+  return Array.from(root.getElementsByTagName('*')).filter(el => el.localName === name);
+}
+function xmlLocalOne(root, name){
+  return xmlLocalAll(root, name)[0] || null;
+}
+function xmlLocalText(root, name){
+  const el = xmlLocalOne(root, name);
+  return el ? (el.textContent || '').trim() : '';
+}
+function xmlLocalNum(root, name){
+  const t = xmlLocalText(root, name); if(!t) return null;
+  const n = +t; return Number.isFinite(n) ? n : null;
 }
 
-/* TCX 파싱 */
-function parseTCX(xmlText){
-  const doc = new DOMParser().parseFromString(xmlText,'application/xml');
-  const laps = Array.from(doc.getElementsByTagName('Lap'));
-  let dist=0, dur=0, hrSum=0, hrN=0, cadSum=0, cadN=0;
-  laps.forEach(l=>{
-    const d = +l.getElementsByTagName('DistanceMeters')[0]?.textContent||0;
-    const t = +l.getElementsByTagName('TotalTimeSeconds')[0]?.textContent||0;
-    dist+=d; dur+=t;
-  });
-  Array.from(doc.getElementsByTagName('HeartRateBpm')).forEach(h=>{ const v=+h.getElementsByTagName('Value')[0]?.textContent; if(v){hrSum+=v;hrN++;} });
-  Array.from(doc.getElementsByTagName('Cadence')).forEach(c=>{ const v=+c.textContent; if(v){cadSum+=v;cadN++;} });
-  const t0 = doc.getElementsByTagName('Id')[0]?.textContent || doc.getElementsByTagName('Time')[0]?.textContent;
+/* GPX 파싱 — 네임스페이스·확장(HR/CAD)·rtept 지원 */
+function parseGPX(xmlText){
+  const doc = new DOMParser().parseFromString(xmlText, 'application/xml');
+  if(doc.querySelector('parsererror')) return null;
+  let pts = xmlLocalAll(doc, 'trkpt');
+  if(pts.length < 2) pts = xmlLocalAll(doc, 'rtept');
+  if(pts.length < 2) return null;
+  const points = pts.map(p=>{
+    const lat = +p.getAttribute('lat'), lon = +p.getAttribute('lon');
+    const time = xmlLocalText(p, 'time') || null;
+    let hr = xmlLocalNum(p, 'hr');
+    let cad = xmlLocalNum(p, 'cad');
+    // 일부 파일은 extensions 안 태그명이 다름
+    if(hr==null){ const h = xmlLocalOne(p, 'heartrate') || xmlLocalOne(p, 'HeartRate'); if(h) hr = +h.textContent; }
+    return { lat, lon, time, hr: (hr>0&&hr<250)?hr:null, cad: (cad>0&&cad<300)?cad:null };
+  }).filter(p=>Number.isFinite(p.lat)&&Number.isFinite(p.lon));
+  if(points.length < 2) return null;
+  let dist=0; for(let i=1;i<points.length;i++) dist += haversine(points[i-1], points[i]);
+  const t0 = points.find(p=>p.time)?.time;
+  const t1 = [...points].reverse().find(p=>p.time)?.time;
+  let dur = (t0&&t1) ? (new Date(t1)-new Date(t0))/1000 : null;
+  if(!(dur>0)) dur = null;
+  const hrs = points.map(p=>p.hr).filter(v=>v!=null);
+  const cads = points.map(p=>p.cad).filter(v=>v!=null);
+  // GPX TrackPointExtension cad: Amazfit/Garmin은 종종 SPM/2 → 중앙값이 낮으면 ×2
+  let cadence = cads.length ? Math.round(cads.reduce((a,b)=>a+b,0)/cads.length) : null;
+  if(cadence!=null && cadence < 90) cadence = Math.round(cadence * 2);
   const km = dist/1000;
-  if(!km) return null;
-  return { distanceKm:+km.toFixed(2), durationSec:Math.round(dur),
-    avgPaceSec: dur&&km?dur/km:null, avgHr: hrN?Math.round(hrSum/hrN):null,
-    cadence: cadN?Math.round(cadSum*2/cadN):null, date: t0||new Date().toISOString() };
+  if(!(km>0.01) && !(dur>0)) return null;
+  return {
+    distanceKm: km>0 ? +km.toFixed(2) : null,
+    durationSec: dur ? Math.round(dur) : null,
+    avgPaceSec: (dur&&km) ? dur/km : null,
+    avgHr: hrs.length ? Math.round(hrs.reduce((a,b)=>a+b,0)/hrs.length) : null,
+    cadence,
+    date: t0 || new Date().toISOString(),
+    path: downsamplePath(points.map(p=>[p.lat,p.lon]), 2000)
+  };
+}
+
+/* TCX 파싱 — Lap 요약 + Trackpoint 폴백, RunCadence(러닝 SPM) 지원 */
+function parseTCX(xmlText){
+  const doc = new DOMParser().parseFromString(xmlText, 'application/xml');
+  if(doc.querySelector('parsererror')) return null;
+  const laps = xmlLocalAll(doc, 'Lap');
+  let dist=0, dur=0;
+  laps.forEach(l=>{
+    dist += xmlLocalNum(l, 'DistanceMeters') || 0;
+    dur  += xmlLocalNum(l, 'TotalTimeSeconds') || 0;
+  });
+  // Lap 거리가 비면 트랙포인트로 보정
+  const tps = xmlLocalAll(doc, 'Trackpoint');
+  if(!(dist>0) && tps.length >= 2){
+    let last = null;
+    tps.forEach(tp=>{
+      const lat = xmlLocalNum(tp, 'LatitudeDegrees');
+      const lon = xmlLocalNum(tp, 'LongitudeDegrees');
+      if(lat==null || lon==null) return;
+      const p = { lat, lon };
+      if(last) dist += haversine(last, p);
+      last = p;
+      const dm = xmlLocalNum(tp, 'DistanceMeters');
+      if(dm!=null && dm > dist) dist = dm;
+    });
+  }
+  if(!(dur>0) && tps.length >= 2){
+    const tFirst = xmlLocalText(tps[0], 'Time');
+    const tLast  = xmlLocalText(tps[tps.length-1], 'Time');
+    if(tFirst && tLast) dur = (new Date(tLast)-new Date(tFirst))/1000;
+  }
+  let hrSum=0, hrN=0, cadSum=0, cadN=0, runCad=false;
+  xmlLocalAll(doc, 'HeartRateBpm').forEach(h=>{
+    const v = xmlLocalNum(h, 'Value') ?? (+h.textContent||null);
+    if(v>0 && v<250){ hrSum+=v; hrN++; }
+  });
+  // 러닝: Extensions/RunCadence 가 SPM. Cadence 태그는 사이클링 rpm 인 경우가 많음
+  xmlLocalAll(doc, 'RunCadence').forEach(c=>{
+    const v = +c.textContent; if(v>0 && v<300){ cadSum+=v; cadN++; runCad=true; }
+  });
+  if(!cadN){
+    xmlLocalAll(doc, 'Cadence').forEach(c=>{
+      const v = +c.textContent; if(v>0 && v<300){ cadSum+=v; cadN++; }
+    });
+  }
+  let cadence = cadN ? Math.round(cadSum/cadN) : null;
+  if(cadence!=null && !runCad && cadence < 90) cadence = Math.round(cadence * 2);
+  const act = xmlLocalOne(doc, 'Activity');
+  const t0 = xmlLocalText(doc, 'Id')
+    || (act && act.getAttribute && act.getAttribute('Id'))
+    || xmlLocalText(doc, 'Time')
+    || (laps[0] && laps[0].getAttribute && laps[0].getAttribute('StartTime'))
+    || '';
+  const km = dist/1000;
+  if(!(km>0.01) && !(dur>0)) return null;
+  return {
+    distanceKm: km>0 ? +km.toFixed(2) : null,
+    durationSec: dur>0 ? Math.round(dur) : null,
+    avgPaceSec: (dur>0 && km>0) ? dur/km : null,
+    avgHr: hrN ? Math.round(hrSum/hrN) : null,
+    cadence,
+    date: t0 || new Date().toISOString()
+  };
+}
+
+/* ── FIT 바이너리 파서 (세션/랩/레코드 요약 · Amazfit/Zepp) ── */
+const FIT_EPOCH_MS = Date.UTC(1989, 11, 31, 0, 0, 0);
+function fitReadValue(dv, offset, size, baseType, little){
+  const t = baseType & 0x1F;
+  try{
+    if(t===0 || t===2 || t===10 || t===13){ // enum/uint8/uint8z/byte
+      if(size===1){ const v=dv.getUint8(offset); return v===0xFF?null:v; }
+      return null;
+    }
+    if(t===1){ const v=dv.getInt8(offset); return v===0x7F?null:v; }
+    if(t===3 || t===4){ // sint16 / uint16 (+z)
+      if(size<2) return null;
+      if(t===3){ const v=dv.getInt16(offset,little); return v===0x7FFF?null:v; }
+      const v=dv.getUint16(offset,little); return v===0xFFFF?null:v;
+    }
+    if(t===5 || t===6 || t===11 || t===12){ // sint32/uint32 (+z)
+      if(size<4) return null;
+      if(t===5){ const v=dv.getInt32(offset,little); return v===0x7FFFFFFF?null:v; }
+      const v=dv.getUint32(offset,little); return v===0xFFFFFFFF?null:v;
+    }
+    if(t===7){ // string
+      let s=''; for(let i=0;i<size;i++){ const c=dv.getUint8(offset+i); if(!c) break; s+=String.fromCharCode(c); }
+      return s || null;
+    }
+    if(t===8){ if(size<4) return null; const v=dv.getFloat32(offset,little); return Number.isFinite(v)?v:null; }
+    if(t===9){ if(size<8) return null; const v=dv.getFloat64(offset,little); return Number.isFinite(v)?v:null; }
+  }catch(e){ return null; }
+  return null;
+}
+function parseFIT(buf){
+  try{
+    const u8 = buf instanceof ArrayBuffer ? new Uint8Array(buf) : new Uint8Array(buf.buffer||buf);
+    if(u8.length < 14) return null;
+    const dv = new DataView(u8.buffer, u8.byteOffset, u8.byteLength);
+    const headerSize = u8[0];
+    if(headerSize < 12 || headerSize > 64) return null;
+    const dataSize = dv.getUint32(4, true);
+    const dataEnd = Math.min(headerSize + dataSize, u8.length);
+    let offset = headerSize;
+    const defs = Object.create(null);
+    let session = null;
+    const laps = [];
+    const records = [];
+
+    while(offset < dataEnd){
+      const hdr = u8[offset++];
+      if(hdr & 0x80){
+        // compressed timestamp header
+        const localId = (hdr >> 5) & 0x03;
+        const def = defs[localId];
+        if(!def) break;
+        const msg = {};
+        for(const f of def.fields){
+          msg[f.num] = fitReadValue(dv, offset, f.size, f.baseType, def.little);
+          offset += f.size;
+          if(offset > dataEnd) break;
+        }
+        if(def.devSize) offset += def.devSize;
+        if(def.global === 20) records.push(msg);
+        else if(def.global === 19) laps.push(msg);
+        else if(def.global === 18) session = msg;
+        continue;
+      }
+      const localId = hdr & 0x0F;
+      const isDef = !!(hdr & 0x40);
+      const hasDev = !!(hdr & 0x20);
+      if(isDef){
+        if(offset + 5 > dataEnd) break;
+        offset++; // reserved
+        const arch = u8[offset++];
+        const little = arch === 0;
+        const global = little ? dv.getUint16(offset, true) : dv.getUint16(offset, false);
+        offset += 2;
+        const nFields = u8[offset++];
+        const fields = [];
+        let fieldBytes = 0;
+        for(let i=0;i<nFields;i++){
+          if(offset+3 > dataEnd) break;
+          const num = u8[offset++], size = u8[offset++], baseType = u8[offset++];
+          fields.push({ num, size, baseType });
+          fieldBytes += size;
+        }
+        let devSize = 0;
+        if(hasDev){
+          if(offset >= dataEnd) break;
+          const nDev = u8[offset++];
+          for(let i=0;i<nDev;i++){
+            if(offset+3 > dataEnd) break;
+            offset++; // field num
+            const size = u8[offset++];
+            offset++; // dev data index
+            devSize += size;
+          }
+        }
+        defs[localId] = { global, fields, little, devSize };
+      } else {
+        const def = defs[localId];
+        if(!def) break;
+        const msg = {};
+        for(const f of def.fields){
+          msg[f.num] = fitReadValue(dv, offset, f.size, f.baseType, def.little);
+          offset += f.size;
+          if(offset > dataEnd) break;
+        }
+        if(def.devSize) offset += def.devSize;
+        if(def.global === 18) session = msg;
+        else if(def.global === 19) laps.push(msg);
+        else if(def.global === 20) records.push(msg);
+      }
+    }
+
+    // Session 우선, 없으면 Lap/Record 합산
+    let distM=null, durSec=null, avgHr=null, cadence=null, startMs=null, sport=null;
+    const applySession = (s)=>{
+      if(!s) return;
+      if(s[5]!=null) sport = s[5];
+      if(s[2]!=null) startMs = FIT_EPOCH_MS + s[2]*1000;
+      // total_timer_time / total_elapsed_time: scale 1000
+      const tTimer = s[8]!=null ? s[8]/1000 : null;
+      const tElap  = s[7]!=null ? s[7]/1000 : null;
+      durSec = tTimer || tElap;
+      if(s[9]!=null) distM = s[9]/100; // scale 100 → meters
+      if(s[16]!=null) avgHr = s[16];
+      // avg_running_cadence(21) 우선, 없으면 avg_cadence(17)
+      if(s[21]!=null) cadence = s[21];
+      else if(s[17]!=null){
+        cadence = s[17];
+        if(sport===1 || sport===11 || cadence < 90) cadence = Math.round(cadence * 2);
+      }
+    };
+    applySession(session);
+    if((distM==null || !(distM>0)) && laps.length){
+      let d=0, t=0, hrS=0, hrN=0, cadS=0, cadN=0;
+      laps.forEach(l=>{
+        if(l[9]!=null) d += l[9]/100;
+        if(l[8]!=null) t += l[8]/1000;
+        else if(l[7]!=null) t += l[7]/1000;
+        if(l[16]!=null){ hrS+=l[16]; hrN++; }
+        if(l[21]!=null){ cadS+=l[21]; cadN++; }
+        else if(l[17]!=null){ cadS+=l[17]*2; cadN++; }
+        if(startMs==null && l[2]!=null) startMs = FIT_EPOCH_MS + l[2]*1000;
+      });
+      if(d>0) distM = d;
+      if(t>0) durSec = t;
+      if(avgHr==null && hrN) avgHr = Math.round(hrS/hrN);
+      if(cadence==null && cadN) cadence = Math.round(cadS/cadN);
+    }
+    if((distM==null || !(distM>0) || durSec==null) && records.length >= 2){
+      const semi = (v)=> v==null?null: v * (180 / 0x80000000);
+      let last=null, trackDist=0, maxDistField=0;
+      const hrs=[], cads=[];
+      let tFirst=null, tLast=null;
+      records.forEach(r=>{
+        if(r[253]!=null){ if(tFirst==null) tFirst=r[253]; tLast=r[253]; }
+        if(r[5]!=null) maxDistField = Math.max(maxDistField, r[5]/100);
+        const lat = semi(r[0]), lon = semi(r[1]);
+        if(lat!=null && lon!=null){
+          const p={lat,lon};
+          if(last) trackDist += haversine(last, p);
+          last = p;
+        }
+        if(r[3]!=null) hrs.push(r[3]);
+        if(r[4]!=null) cads.push(r[4]);
+      });
+      if(!(distM>0)) distM = maxDistField || trackDist || null;
+      if(!(durSec>0) && tFirst!=null && tLast!=null) durSec = tLast - tFirst;
+      if(startMs==null && tFirst!=null) startMs = FIT_EPOCH_MS + tFirst*1000;
+      if(avgHr==null && hrs.length) avgHr = Math.round(hrs.reduce((a,b)=>a+b,0)/hrs.length);
+      if(cadence==null && cads.length){
+        let c = Math.round(cads.reduce((a,b)=>a+b,0)/cads.length);
+        if(c < 90) c *= 2;
+        cadence = c;
+      }
+    }
+    const km = distM!=null ? distM/1000 : null;
+    if(!(km>0.01) && !(durSec>0)) return null;
+    return {
+      distanceKm: km>0 ? +km.toFixed(2) : null,
+      durationSec: durSec>0 ? Math.round(durSec) : null,
+      avgPaceSec: (durSec>0 && km>0) ? durSec/km : null,
+      avgHr: avgHr>0 ? avgHr : null,
+      cadence: cadence>0 ? cadence : null,
+      date: startMs ? new Date(startMs).toISOString() : new Date().toISOString()
+    };
+  }catch(e){ return null; }
+}
+
+function isFitBuffer(buf){
+  try{
+    const u8 = new Uint8Array(buf);
+    if(u8.length < 12) return false;
+    return u8[8]===0x2E && u8[9]===0x46 && u8[10]===0x49 && u8[11]===0x54; // .FIT
+  }catch(e){ return false; }
 }
 
 /* 파일 → 기록 후보 */
 async function fileToRecord(file){
   const name = file.name || '';
   const lower = name.toLowerCase();
+  const mime = (file.type || '').toLowerCase();
   const base = { id:uid(), date:new Date(file.lastModified||Date.now()).toISOString(),
                  source:'file', fileName:name, notes:'', autoType:true };
-  if(/\.(gpx)$/i.test(lower)){
-    const txt = await file.text(); const p = parseGPX(txt);
-    if(p) Object.assign(base, p, {type:classifyRun({...p, hint:name})});
-  } else if(/\.(tcx)$/i.test(lower)){
-    const txt = await file.text(); const p = parseTCX(txt);
-    if(p) Object.assign(base, p, {type:classifyRun({...p, hint:name})});
+  const applyParsed = (p)=>{
+    if(!p){ Object.assign(base, { type:'easy', needsReview:true, notes:'파일에서 거리/시간을 읽지 못했어요' }); return; }
+    Object.assign(base, p, {
+      type: classifyRun({ ...p, hint: name + ' amazfit zepp active' }),
+      notes: /amazfit|zepp|active\s*3/i.test(name) ? 'Amazfit Active 3' : (base.notes||'')
+    });
+    if(!(p.distanceKm>0) || !(p.durationSec>0)) base.needsReview = true;
+  };
+
+  if(/\.(gpx)$/i.test(lower) || mime.includes('gpx')){
+    applyParsed(parseGPX(await file.text()));
+  } else if(/\.(tcx)$/i.test(lower) || mime.includes('tcx')){
+    applyParsed(parseTCX(await file.text()));
+  } else if(/\.(fit)$/i.test(lower) || mime.includes('fit')){
+    applyParsed(parseFIT(await file.arrayBuffer()));
   } else if(/\.(txt|csv)$/i.test(lower)){
     const txt = await file.text(); const p = parseTextMetrics(txt);
     Object.assign(base, {distanceKm:p.distanceKm||null, durationSec:p.durationSec||null,
       avgPaceSec:p.avgPaceSec||null, avgHr:p.avgHr||null, cadence:p.cadence||null,
       type:classifyRun({...p, hint:txt+' '+name})});
-  } else if(file.type.startsWith('image/')){
-    // 이미지: 썸네일 저장. 파일명에 수치가 있으면 추출, 없으면 수동 보정 유도
+  } else if((file.type||'').startsWith('image/')){
     const dataUrl = await new Promise(r=>{ const fr=new FileReader(); fr.onload=()=>r(fr.result); fr.readAsDataURL(file); });
     await DB.put('files', { id:base.id, dataUrl });
     const p = parseTextMetrics(name);
     Object.assign(base, {hasImage:true, distanceKm:p.distanceKm||null, durationSec:p.durationSec||null,
       avgPaceSec:p.avgPaceSec||null, type:guessType(name,p.distanceKm,p.avgPaceSec), needsReview:true});
   } else {
-    Object.assign(base, {type:'easy', needsReview:true});
+    // 확장자/MIME 애매함(iOS·Zepp 공유): 매직바이트·XML 헤더로 판별
+    const buf = await file.arrayBuffer();
+    if(isFitBuffer(buf)) applyParsed(parseFIT(buf));
+    else {
+      const txt = new TextDecoder('utf-8', { fatal:false }).decode(buf);
+      if(/<gpx[\s>]/i.test(txt)) applyParsed(parseGPX(txt));
+      else if(/TrainingCenterDatabase|<Activity[\s>]/i.test(txt)) applyParsed(parseTCX(txt));
+      else Object.assign(base, {type:'easy', needsReview:true, notes:'지원 형식: GPX · TCX · FIT (Amazfit/Zepp 내보내기)'});
+    }
   }
   return base;
 }
@@ -871,10 +1167,12 @@ async function handleFiles(files){
   const others = arr.filter(f=> !(f.type||'').startsWith('image/'));
   let added = 0;
 
-  // 1) 비이미지(GPX/TCX/TXT): 기존 개별 처리
+  // 1) 비이미지(GPX/TCX/FIT/TXT): Amazfit·Zepp 내보내기 포함
+  let fileOk = 0, fileBad = 0;
   for(const f of others){
     const rec = await fileToRecord(f);
     await DB.put('records', rec); state.records.push(rec); added++;
+    if(rec.distanceKm>0 && rec.durationSec>0) fileOk++; else fileBad++;
   }
   if(others.length){ state.records.sort((a,b)=>new Date(b.date)-new Date(a.date)); recompute(); renderRecords(); }
 
@@ -931,7 +1229,9 @@ async function handleFiles(files){
     toast(`정리 완료 · 새 기록 ${recCount}개${mergedCount?` · 사진 ${mergedCount}장 같은 러닝에 매칭`:''}`);
   } else if(added){
     recompute(); await reclassifyAllAuto(); recompute(); renderRecords();
-    toast(`${added}개 기록 추가`);
+    toast(fileBad
+      ? `${fileOk}개 정상 · ${fileBad}개는 수치 확인 필요(기록 탭에서 보정)`
+      : `${fileOk}개 기록 추가 (GPX/TCX/FIT)`);
   }
 }
 

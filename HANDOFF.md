@@ -21,7 +21,7 @@ GitHub Pages로 배포합니다. (빌드 도구·Node 불필요)
 - **배포**: GitHub `main`에 push → GitHub Pages 자동 배포
   - 저장소: https://github.com/Hoon118/running-coach.git
   - 라이브: https://hoon-run-coach.netlify.app/ (또는 GitHub Pages 주소)
-- **현재 버전**: v22 (`app.js`의 `APP_VERSION`과 `sw.js`의 `CACHE`가 항상 일치해야 함)
+- **현재 버전**: v23 (`app.js`의 `APP_VERSION`과 `sw.js`의 `CACHE`가 항상 일치해야 함)
 
 ---
 
@@ -79,6 +79,8 @@ cd running-coach
 - **이미지 OCR/매칭**: `handleFiles`, `buildImageItem`, `sameRun`, `matchCost`,
   `findMergeTarget`, `attachImageToRecord`, `mergeImageGroup`, `splitsTotals`
   - v21에서 매칭 오차범위 축소(거리 0.2km·시간 25초) + 독립신호 2개↑ 일치 조건
+- **워치 파일**: `parseGPX`/`parseTCX`/`parseFIT` — Amazfit Active 3(Zepp) GPX·TCX·FIT 내보내기
+  (네임스페이스·RunCadence·FIT 세션/랩/레코드 요약)
 - **훈련 플랜**: `generatePlan` → `generateNsmPlan` / `generateMixedPlan`,
   `buildIntervalWorkout`/`buildTempoWorkout`/`buildNsmWorkout`
 - **실시간 러닝**: `startRun`, `tick`, `updateWorkoutProgress`, `renderWorkoutStep`
