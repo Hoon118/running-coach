@@ -6,7 +6,7 @@
 'use strict';
 
 /* 앱 버전 (sw.js 캐시 버전과 동일하게 유지) */
-const APP_VERSION = 'v23';
+const APP_VERSION = 'v24';
 
 /* ---------- 세션 타입 정의 ---------- */
 const TYPES = {
@@ -1968,11 +1968,21 @@ function renderTodayWorkout(){
    ============================================================ */
 function setupCanvas(cv){
   const dpr = window.devicePixelRatio||1;
-  const h = cv.getAttribute('height')*1;
-  cv.style.height = h + 'px';           // 표시 높이 고정 (고해상도 기기에서 세로 늘어남 방지)
-  const w = cv.clientWidth || cv.parentElement.clientWidth;
-  cv.width = w*dpr; cv.height = h*dpr;   // 버퍼는 dpr 배율로 선명하게
-  const ctx = cv.getContext('2d'); ctx.scale(dpr,dpr);
+  // 논리 높이는 최초 1회만 고정 저장 (cv.height 재설정 시 HTML height 속성이
+  // 버퍼 픽셀값으로 바뀌어, 탭을 누를 때마다 세로로 계속 커지는 버그 방지)
+  if(!cv.dataset.logicalH){
+    const attrH = +(cv.getAttribute('height')||0);
+    const cssH = parseFloat(cv.style.height)||0;
+    cv.dataset.logicalH = String(attrH || cssH || cv.clientHeight || 150);
+  }
+  const h = +cv.dataset.logicalH;
+  cv.style.height = h + 'px';
+  const w = Math.max(1, cv.clientWidth || cv.parentElement?.clientWidth || 300);
+  cv.width = Math.max(1, Math.round(w*dpr));
+  cv.height = Math.max(1, Math.round(h*dpr));
+  const ctx = cv.getContext('2d');
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0); // scale 누적 없이 DPR 맞춤
+  ctx.clearRect(0, 0, w, h);
   return {ctx, w, h};
 }
 function drawWeeklyChart(){
