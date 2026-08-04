@@ -6,7 +6,7 @@
 'use strict';
 
 /* 앱 버전 (sw.js 캐시 버전과 동일하게 유지) */
-const APP_VERSION = 'v24';
+const APP_VERSION = 'v25';
 
 /* ---------- 세션 타입 정의 ---------- */
 const TYPES = {
@@ -3239,13 +3239,52 @@ async function boot(){
   await reclassifyAllAuto(); recompute();   // 기존 기록도 최신 존 기준으로 재판정
   // 영구 저장 요청 (데이터 보존)
   if(navigator.storage&&navigator.storage.persist){ try{ await navigator.storage.persist(); }catch(e){} }
-  // 서비스워커
-  if('serviceWorker' in navigator){ try{ const reg=await navigator.serviceWorker.register('sw.js'); reg.update&&reg.update(); }catch(e){} }
+  // 서비스워커 — 아이폰 PWA도 새 버전 즉시 적용
+  setupServiceWorker();
   go('home');
   // 첫 실행 안내
   if(!state.records.length){
     setTimeout(()=> toast('러닝 기록을 첨부해 시작해 보세요 📎'), 800);
   }
 }
+
+/* 아이폰 홈화면 PWA: 포그라운드마다 SW 확인 → 새 버전이면 바로 새로고침 */
+function setupServiceWorker(){
+  if(!('serviceWorker' in navigator)) return;
+  let reloading = false;
+  const reloadOnce = ()=>{
+    if(reloading) return;
+    reloading = true;
+    location.reload();
+  };
+  navigator.serviceWorker.addEventListener('controllerchange', reloadOnce);
+  navigator.serviceWorker.addEventListener('message', (e)=>{
+    if(e.data && e.data.type==='SW_UPDATED') reloadOnce();
+  });
+  (async ()=>{
+    try{
+      const reg = await navigator.serviceWorker.register('./sw.js?v='+APP_VERSION, { updateViaCache:'none' });
+      const kick = ()=>{
+        try{
+          reg.update();
+          if(reg.waiting) reg.waiting.postMessage({ type:'SKIP_WAITING' });
+        }catch(e){}
+      };
+      kick();
+      reg.addEventListener('updatefound', ()=>{
+        const nw = reg.installing; if(!nw) return;
+        nw.addEventListener('statechange', ()=>{
+          if(nw.state==='installed') nw.postMessage({ type:'SKIP_WAITING' });
+        });
+      });
+      document.addEventListener('visibilitychange', ()=>{ if(document.visibilityState==='visible') kick(); });
+      window.addEventListener('pageshow', kick);
+      window.addEventListener('focus', kick);
+      // 첫 진입 직후 한 번 더 (Safari가 늦게 감지하는 경우)
+      setTimeout(kick, 2500);
+    }catch(e){}
+  })();
+}
+
 window.go = go;
 boot();
