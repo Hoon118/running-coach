@@ -6,7 +6,7 @@
 'use strict';
 
 /* 앱 버전 (sw.js 캐시 버전과 동일하게 유지) */
-const APP_VERSION = 'v25';
+const APP_VERSION = 'v26';
 
 /* ---------- 세션 타입 정의 ---------- */
 const TYPES = {
@@ -664,13 +664,20 @@ function parseTCX(xmlText){
     if(tFirst && tLast) dur = (new Date(tLast)-new Date(tFirst))/1000;
   }
   let hrSum=0, hrN=0, cadSum=0, cadN=0, runCad=false;
+  // Trackpoint HeartRateBpm + Lap AverageHeartRateBpm (Zepp)
   xmlLocalAll(doc, 'HeartRateBpm').forEach(h=>{
     const v = xmlLocalNum(h, 'Value') ?? (+h.textContent||null);
     if(v>0 && v<250){ hrSum+=v; hrN++; }
   });
-  // 러닝: Extensions/RunCadence 가 SPM. Cadence 태그는 사이클링 rpm 인 경우가 많음
-  xmlLocalAll(doc, 'RunCadence').forEach(c=>{
-    const v = +c.textContent; if(v>0 && v<300){ cadSum+=v; cadN++; runCad=true; }
+  xmlLocalAll(doc, 'AverageHeartRateBpm').forEach(h=>{
+    const v = xmlLocalNum(h, 'Value');
+    if(v>0 && v<250){ hrSum+=v; hrN++; }
+  });
+  // Zepp/Amazfit: ns3:AvgRunCadence (이미 SPM). RunCadence / Cadence 폴백
+  ;['AvgRunCadence','avgRunCadence','RunCadence','MaxRunCadence','maxRunCadence'].forEach(tag=>{
+    xmlLocalAll(doc, tag).forEach(c=>{
+      const v = +c.textContent; if(v>0 && v<300){ cadSum+=v; cadN++; runCad=true; }
+    });
   });
   if(!cadN){
     xmlLocalAll(doc, 'Cadence').forEach(c=>{
@@ -898,22 +905,24 @@ async function fileToRecord(file){
   const lower = name.toLowerCase();
   const mime = (file.type || '').toLowerCase();
   const base = { id:uid(), date:new Date(file.lastModified||Date.now()).toISOString(),
-                 source:'file', fileName:name, notes:'', autoType:true };
-  const applyParsed = (p)=>{
-    if(!p){ Object.assign(base, { type:'easy', needsReview:true, notes:'파일에서 거리/시간을 읽지 못했어요' }); return; }
+                 source:'file', fileName:name || 'watch-export', notes:'', autoType:true };
+  const applyParsed = (p, kind)=>{
+    if(!p){ Object.assign(base, { type:'easy', needsReview:true, notes:(kind||'파일')+'에서 거리/시간을 읽지 못했어요' }); return false; }
     Object.assign(base, p, {
-      type: classifyRun({ ...p, hint: name + ' amazfit zepp active' }),
-      notes: /amazfit|zepp|active\s*3/i.test(name) ? 'Amazfit Active 3' : (base.notes||'')
+      type: classifyRun({ ...p, hint: name + ' amazfit zepp active running' }),
+      notes: (/amazfit|zepp|active/i.test(name) || kind) ? ('Amazfit/Zepp'+(kind?(' · '+kind):'')) : (base.notes||'')
     });
     if(!(p.distanceKm>0) || !(p.durationSec>0)) base.needsReview = true;
+    return true;
   };
 
+  // 1) 확장자/MIME 우선
   if(/\.(gpx)$/i.test(lower) || mime.includes('gpx')){
-    applyParsed(parseGPX(await file.text()));
+    applyParsed(parseGPX(await file.text()), 'GPX');
   } else if(/\.(tcx)$/i.test(lower) || mime.includes('tcx')){
-    applyParsed(parseTCX(await file.text()));
-  } else if(/\.(fit)$/i.test(lower) || mime.includes('fit')){
-    applyParsed(parseFIT(await file.arrayBuffer()));
+    applyParsed(parseTCX(await file.text()), 'TCX');
+  } else if(/\.(fit)$/i.test(lower) || mime==='application/fit' || mime.endsWith('/fit')){
+    applyParsed(parseFIT(await file.arrayBuffer()), 'FIT');
   } else if(/\.(txt|csv)$/i.test(lower)){
     const txt = await file.text(); const p = parseTextMetrics(txt);
     Object.assign(base, {distanceKm:p.distanceKm||null, durationSec:p.durationSec||null,
@@ -926,14 +935,19 @@ async function fileToRecord(file){
     Object.assign(base, {hasImage:true, distanceKm:p.distanceKm||null, durationSec:p.durationSec||null,
       avgPaceSec:p.avgPaceSec||null, type:guessType(name,p.distanceKm,p.avgPaceSec), needsReview:true});
   } else {
-    // 확장자/MIME 애매함(iOS·Zepp 공유): 매직바이트·XML 헤더로 판별
+    // 2) iOS: 확장자 없거나 octet-stream → 내용으로 판별
     const buf = await file.arrayBuffer();
-    if(isFitBuffer(buf)) applyParsed(parseFIT(buf));
+    if(isFitBuffer(buf)) applyParsed(parseFIT(buf), 'FIT');
     else {
-      const txt = new TextDecoder('utf-8', { fatal:false }).decode(buf);
-      if(/<gpx[\s>]/i.test(txt)) applyParsed(parseGPX(txt));
-      else if(/TrainingCenterDatabase|<Activity[\s>]/i.test(txt)) applyParsed(parseTCX(txt));
-      else Object.assign(base, {type:'easy', needsReview:true, notes:'지원 형식: GPX · TCX · FIT (Amazfit/Zepp 내보내기)'});
+      const txt = new TextDecoder('utf-8', { fatal:false }).decode(buf.slice(0, Math.min(buf.byteLength, 2_000_000)));
+      if(/<gpx[\s>]/i.test(txt)) applyParsed(parseGPX(txt), 'GPX');
+      else if(/TrainingCenterDatabase/i.test(txt) || /<Activity[\s>]/i.test(txt)) applyParsed(parseTCX(txt), 'TCX');
+      else if(/\.(fit)$/i.test(lower) || mime.includes('octet-stream')){
+        // 이름에 .fit 이거나 바이너리로 보이면 FIT 재시도
+        applyParsed(parseFIT(buf), 'FIT');
+      } else {
+        Object.assign(base, {type:'easy', needsReview:true, notes:'지원 형식: GPX · TCX · FIT (Zepp 내보내기)'});
+      }
     }
   }
   return base;
@@ -1162,7 +1176,9 @@ async function buildImageItem(dataUrl, fileName, mtime, ocrReady){
 }
 
 async function handleFiles(files){
-  const arr = Array.from(files);
+  const arr = Array.from(files||[]);
+  if(!arr.length){ toast('선택된 파일이 없어요'); return; }
+  toast(`${arr.length}개 파일 처리 중…`);
   const images = arr.filter(f=> (f.type||'').startsWith('image/'));
   const others = arr.filter(f=> !(f.type||'').startsWith('image/'));
   let added = 0;
@@ -3067,10 +3083,12 @@ $('#btnWipe').onclick = async ()=>{
 };
 
 /* 기록 탭 버튼 */
-$('#btnAddFile').onclick = ()=>$('#fileInput').click();
+// label[for=fileInput] 이 기본 클릭 담당. 남는 핸들러는 보조.
+const _btnAdd = $('#btnAddFile');
+if(_btnAdd && _btnAdd.tagName==='BUTTON') _btnAdd.onclick = ()=>$('#fileInput').click();
 $('#btnAddManual').onclick = ()=>editRecord(null);
 $('#btnOcrAll').onclick = ()=>ocrAllImages();
-$('#fileInput').onchange = (e)=>{ if(e.target.files.length) handleFiles(e.target.files); e.target.value=''; };
+$('#fileInput').onchange = (e)=>{ if(e.target.files && e.target.files.length) handleFiles(e.target.files); e.target.value=''; };
 $('#recFilter').onchange = renderRecords;
 
 /* ============================================================

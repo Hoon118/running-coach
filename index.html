@@ -26,6 +26,11 @@ a{color:var(--blue)}
 h1,h2,h3,h4{margin:0;font-weight:700;letter-spacing:-0.01em}
 button{font-family:inherit;cursor:pointer;border:none;background:none;color:inherit}
 .hidden{display:none !important}
+/* iOS: input[type=file] 에 display:none 이면 파일 선택이 막힘 → 시각만 숨김 */
+.file-hidden{
+  position:fixed; left:0; top:0; width:1px; height:1px; padding:0; margin:0;
+  opacity:0; overflow:hidden; border:0; clip:rect(0 0 0 0);
+}
 
 /* 상단 헤더 */
 header.app{position:sticky;top:0;z-index:30;padding:calc(env(safe-area-inset-top) + 12px) 16px 12px;
@@ -281,12 +286,13 @@ canvas.chart{width:100%;height:150px;display:block}
       <h2>러닝 기록 첨부 & 학습</h2>
       <div class="desc">Amazfit Active 3(Zepp) <b>GPX · TCX · FIT</b>, 스크린샷, txt 또는 직접 입력으로 기록을 추가하면 체력·플랜에 반영합니다.</div>
       <div class="grid2">
-        <button class="btn" id="btnAddFile">📎 파일 첨부</button>
-        <button class="btn" id="btnAddManual">✏️ 직접 입력</button>
+        <label class="btn" for="fileInput" id="btnAddFile" style="cursor:pointer;margin:0">📎 파일 첨부</label>
+        <button class="btn" id="btnAddManual" type="button">✏️ 직접 입력</button>
       </div>
-      <input type="file" id="fileInput" accept="image/*,.txt,.csv,.gpx,.tcx,.fit,application/gpx+xml,application/vnd.garmin.tcx+xml" multiple class="hidden" />
-      <button class="btn block" id="btnOcrAll" style="margin-top:10px">🔍 첨부 이미지에서 수치 자동 인식</button>
-      <div class="note"><b>워치 기록:</b> Zepp 앱 → 운동 기록 → ⋮ → 데이터 내보내기 → GPX/TCX/FIT 후 여기에 첨부하세요. 거리·시간·페이스·심박·케이던스를 자동으로 읽습니다. <b>스크린샷 여러 장</b>도 한 번에 올릴 수 있고 같은 러닝은 자동 병합됩니다. 수치가 비면 기록을 탭해 보정하세요. 파일은 기기 내부(IndexedDB)에만 저장됩니다.</div>
+      <!-- accept 비움: iOS가 .fit/.tcx UTI를 몰라 목록에서 회색 처리하는 문제 방지. JS에서 형식 판별 -->
+      <input type="file" id="fileInput" multiple class="file-hidden" />
+      <button class="btn block" id="btnOcrAll" type="button" style="margin-top:10px">🔍 첨부 이미지에서 수치 자동 인식</button>
+      <div class="note"><b>워치 기록:</b> Zepp에서보낸 GPX/TCX/FIT를 <b>파일 앱 → 나의 iPhone → 러닝</b> 등에서 고르면 됩니다. 거리·시간·페이스·심박·케이던스를 자동으로 읽습니다. 아이폰에서는 ‘모든 파일’이 보이도록 필터를 열어 두었습니다.</div>
     </div>
     <div style="display:flex;justify-content:space-between;align-items:center;margin:4px 2px 10px">
       <div class="sectitle" style="margin:0">기록 목록 <span id="recCount" style="color:var(--acc)"></span></div>
