@@ -6,7 +6,7 @@
 'use strict';
 
 /* 앱 버전 (sw.js 캐시 버전과 동일하게 유지) */
-const APP_VERSION = 'v32';
+const APP_VERSION = 'v33';
 
 /* ---------- 세션 타입 정의 ---------- */
 const TYPES = {
@@ -357,6 +357,7 @@ function normalizeOcrText(text){
   t = t.replace(/비\s*행\s*시\s*간/g,'비행시간').replace(/체\s*공\s*시\s*간/g,'비행시간');
   t = t.replace(/보\s*폭/g,'보폭').replace(/분\s*포/g,'분포');
   t = t.replace(/수직\s*진\s*동/g,'수직진폭').replace(/오르막\s*합계/g,'상승').replace(/내리막\s*합계/g,'하강');
+  t = t.replace(/공\s*중\s*체\s*류\s*시\s*간/g,'비행시간').replace(/웜\s*업/g,'워밍업');
   return t;
 }
 /* 라벨 근처 숫자 추출 (같은 줄·다음 줄·숫자 뒤 라벨) */
@@ -440,37 +441,75 @@ function parseDistanceKm(t){
   if(short.length) return Math.max(...short);
   return Math.max(...pool);
 }
+function isClockContext(text, idx){
+  const before = String(text||'').slice(Math.max(0, idx-24), idx);
+  return /월|일|오전|오후|\bAM\b|\bPM\b|시작|시각|날짜/.test(before);
+}
+function plausibleRunPace(secPerKm){
+  return secPerKm>=150 && secPerKm<=720; // 2:30~12:00/km
+}
+/* 삼성헬스/Zepp 상단 요약: 1.11 km · 6:11 · 95 kcal · 5'34" · 139 bpm */
+function parseWorkoutHeader(t){
+  const out = {};
+  const head = String(t||'').slice(0, 1100);
+  const distM = head.match(/(\d{1,2}[.,]\d{2})\s*(?:k\s*m|킬로)/i);
+  if(distM){
+    const v = parseFloat(distM[1].replace(',','.'));
+    if(v>0.05 && v<40) out.distanceKm = v;
+  }
+  const calM = head.match(/(\d{2,4})\s*k\s*cal/i);
+  if(calM) out.calories = +calM[1];
+  const paceM = head.match(/(\d{1,2})\s*['’‘`´′:]\s*(\d{2})\s*["”“''′″]?\s*\/\s*k\s*m/i);
+  if(paceM){ const s=parsePaceToken(paceM[1], paceM[2]); if(s) out.avgPaceSec=s; }
+  const hrM = head.match(/(\d{2,3})\s*bpm/i);
+  if(hrM){ const v=+hrM[1]; if(v>=90 && v<=220) out.avgHr=v; }
+  const cadM = head.match(/(\d{2,3})\s*spm/i);
+  if(cadM){ const v=+cadM[1]; if(v>=120 && v<=260) out.cadence=v; }
+  const searchFrom = distM ? distM.index + distM[0].length : 0;
+  const window = head.slice(searchFrom, searchFrom+160);
+  for(const tm of window.matchAll(/(\d{1,2})\s*:\s*(\d{2})(?!\s*:\s*\d)/g)){
+    const absIdx = searchFrom + tm.index;
+    if(isClockContext(head, absIdx)) continue;
+    const s = (+tm[1])*60 + (+tm[2]);
+    if(s<25 || s>8*3600) continue;
+    if(out.distanceKm && !plausibleRunPace(s/out.distanceKm)) continue;
+    out.durationSec = s;
+    break;
+  }
+  if(out.distanceKm && out.avgPaceSec && !out.durationSec){
+    out.durationSec = Math.round(out.distanceKm * out.avgPaceSec);
+  }
+  return out;
+}
 function parseDurationSec(t){
   let m = t.match(/(?:운동\s*시간|총\s*시간|소요\s*시간|duration)\D{0,12}(\d{1,2})\s*:\s*(\d{2})\s*:\s*(\d{2})/i);
   if(m) return (+m[1])*3600+(+m[2])*60+(+m[3]);
   m = t.match(/(\d{1,2})\s*:\s*(\d{2})\s*:\s*(\d{2})/);
-  if(m){
+  if(m && !isClockContext(t, m.index)){
     const s = (+m[1])*3600+(+m[2])*60+(+m[3]);
     if(s>=20 && s<=12*3600) return s;
   }
-  const hh = t.match(/(\d{1,2})\s*시간/), mn = t.match(/(\d{1,3})\s*분/), ss = t.match(/(\d{1,2})\s*초/);
-  if(hh||mn) return (hh?+hh[1]*3600:0)+(mn?+mn[1]*60:0)+(ss?+ss[1]:0);
+  const hh = t.match(/(\d{1,2})\s*시간/), mn = t.match(/(\d{1,3})\s*분(?!\s*\d)/), ss = t.match(/(\d{1,2})\s*초/);
+  if(hh && mn) return (+hh[1])*3600+(+mn[1])*60+(ss?+ss[1]:0);
   m = t.match(/(?:운동\s*시간|총\s*시간|소요\s*시간|duration)\D{0,12}(\d{1,2})\s*:\s*(\d{2})(?!\s*:\s*\d)/i);
   if(m){ const s=(+m[1])*60+(+m[2]); if(s>=20&&s<=5*3600) return s; }
-  // 삼성헬스 상단 mm:ss (거리 바로 옆). 페이스(4'50"~8'00")와 겹치지 않게 20초~3시간
-  const top = t.slice(0, 280);
-  m = top.match(/\b(\d{1,2})\s*:\s*(\d{2})\b(?!\s*:\s*\d)/);
-  if(m){ const s=(+m[1])*60+(+m[2]); if(s>=90 && s<=3*3600) return s; }
   return null;
 }
 function reconcileRunMetrics(out){
   const d=out.distanceKm, t=out.durationSec, p=out.avgPaceSec;
   if(d && t){
     const calc = t/d;
-    // 5km / 6분처럼 불가능한 조합 → 거리 과대(페이스를 km로 읽음)
     if(calc<160 && d>=2.5){
-      if(p && p>=180 && p<=900){
+      if(p && plausibleRunPace(p)){
         const d2 = t/p;
         if(d2>0.15 && d2<d*0.7) out.distanceKm = +d2.toFixed(2);
-      } else {
-        delete out.distanceKm;
-      }
-    } else if(!p && calc>=160 && calc<=1200){
+      } else delete out.distanceKm;
+    } else if(calc>720 && p && plausibleRunPace(p) && d<8){
+      // 17:49 시작시각을 운동시간으로 읽음 → 페이스×거리로 복구
+      out.durationSec = Math.round(p * d);
+    } else if(calc>720 && d<3){
+      delete out.durationSec;
+    } else if(!p && plausibleRunPace(calc)){
       out.avgPaceSec = calc;
     }
   }
@@ -478,8 +517,22 @@ function reconcileRunMetrics(out){
     const s = Math.round(out.avgPaceSec * out.distanceKm);
     if(s>=20 && s<=12*3600) out.durationSec = s;
   }
+  if(out.distanceKm && out.durationSec && out.avgPaceSec){
+    const expect = out.avgPaceSec * out.distanceKm;
+    if(Math.abs(out.durationSec-expect) > Math.max(50, expect*0.3) && out.distanceKm<8 && plausibleRunPace(out.avgPaceSec)){
+      out.durationSec = Math.round(expect);
+    }
+  }
+  // 러닝인데 심박 65 같은 휴식/습도 값
+  if(out.avgHr!=null && out.avgHr<90 && (out.cadence>=150 || (out.avgPaceSec && out.avgPaceSec<480))){
+    delete out.avgHr;
+  }
   if(out.distanceKm && out.durationSec && !out.avgSpeedKmh){
     out.avgSpeedKmh = +(out.distanceKm / (out.durationSec/3600)).toFixed(2);
+  }
+  if(out.hrZones && out.durationSec){
+    const sum = Object.values(out.hrZones).reduce((s,z)=>s+(z.sec||0),0);
+    if(sum > out.durationSec*1.25) delete out.hrZones;
   }
   return out;
 }
@@ -563,12 +616,12 @@ function parseDurToken(str){
   return (+m[1])*60 + (+m[2]);
 }
 function parseTextMetrics(text){
-  const out = {};
   const t = normalizeOcrText(text);
+  const out = parseWorkoutHeader(t);
   const dist = parseDistanceKm(t);
-  if(dist) out.distanceKm = dist;
+  if(dist && (out.distanceKm==null || (dist<3.2 && out.distanceKm>=3.2))) out.distanceKm = dist;
   const dur = parseDurationSec(t);
-  if(dur) out.durationSec = dur;
+  if(dur && out.durationSec==null) out.durationSec = dur;
   // 페이스: 라벨 우선 → /km → 카드 평균·최고
   let m = t.match(/(?:평균\s*)?페이스\D{0,12}(\d{1,2})\s*['’‘`´′:]\s*(\d{2})/i)
     || t.match(/(\d{1,2})\s*['’‘`´′:]\s*(\d{2})\s*["”“''′″]?\s*\/\s*k\s*m/i);
@@ -583,14 +636,16 @@ function parseTextMetrics(text){
       if(b && out.bestPaceSec==null) out.bestPaceSec=Math.min(a||b,b);
     }
   }
-  // 심박: 카드 쌍(144 / 157) 우선
-  const hrPair = pickLabeledPair(t, /심박(?:수)?(?!\s*구간)|heart\s*rate|\bHR\b/i, 60, 230, false);
-  if(hrPair){ out.avgHr=hrPair.avg; if(hrPair.extra!=null) out.hrMax=Math.max(hrPair.avg, hrPair.extra); }
+  // 심박: 카드 쌍(144 / 157). 습도 65·68은 제외
+  const hrPair = pickLabeledPair(t, /심박(?:수)?(?!\s*구간)|heart\s*rate|\bHR\b/i, 90, 230, false);
+  if(hrPair && (out.avgHr==null || hrPair.avg>=90)){
+    out.avgHr=hrPair.avg;
+    if(hrPair.extra!=null && hrPair.extra>=90) out.hrMax=Math.max(hrPair.avg, hrPair.extra);
+  }
   if(out.avgHr==null){
     m = t.match(/평균\s*심박(?:수)?\D{0,12}(\d{2,3})/i)
-      || t.match(/(\d{2,3})\s*bpm/i)
-      || t.match(/심박(?:수)?\D{0,8}(\d{2,3})/i);
-    if(m){ const v=+m[1]; if(v>=60&&v<=230) out.avgHr=v; }
+      || t.match(/(\d{2,3})\s*bpm/i);
+    if(m){ const v=+m[1]; if(v>=90&&v<=230) out.avgHr=v; }
   }
   if(out.hrMax==null){
     m = t.match(/최고\s*심박(?:수)?\D{0,12}(\d{2,3})/i)
@@ -691,11 +746,11 @@ function parseTextMetrics(text){
   // 심박 영역(Zepp): 최고/고/중/저(집중)·워밍업 — 시간·비율
   const hrZones = {};
   const zoneRules = [
-    ['peak',   /최고\s*강도|무\s*산소(?!\s*소모)|최대(?!\s*산소)|peak|anaerobic/i],
-    ['high',   /고\s*강도(?!\s*훈련\s*효과)|유\s*산소\s*강도|intensive|hard/i],
-    ['mid',    /중\s*강도|중간|moderate/i],
-    ['focus',  /저\s*강도|가벼움|light|지방\s*연소|fat\s*burn/i],
-    ['warmup', /워\s*밍\s*업|이완|relax|warm\s*-?\s*up/i]
+    ['peak',   /최고\s*강도|최대(?!\s*산소)|peak/i],
+    ['high',   /고\s*강도(?!\s*훈련\s*효과)|무\s*산소|anaerobic|intensive|hard/i],
+    ['mid',    /중\s*강도|유\s*산소(?!\s*TE|소\s*TE|효과)|aerobic|moderate/i],
+    ['focus',  /저\s*강도|체\s*지방|지방\s*연소|fat\s*burn|light/i],
+    ['warmup', /워\s*밍\s*업|웜\s*업|이완|relax|warm\s*-?\s*up/i]
   ];
   for(const [key, re] of zoneRules){
     const rm = t.match(new RegExp(re.source + '[^\\d%]{0,40}(\\d{1,2}\\s*:\\s*\\d{2})[^\\d%]{0,16}(\\d{1,3}(?:[.,]\\d+)?)\\s*%','i'))
@@ -711,7 +766,10 @@ function parseTextMetrics(text){
       if(rm2){ const sec=parseDurToken(rm2[1]); if(sec!=null) hrZones[key]={ sec, pct:null }; }
       else {
         const rm3 = t.match(new RegExp(re.source + '[^\\d%]{0,40}(\\d{1,3}(?:[.,]\\d+)?)\\s*%','i'));
-        if(rm3){ const pct=parseFloat(rm3[1].replace(',','.')); if(pct>=0&&pct<=100) hrZones[key]={ sec:null, pct }; }
+        const rm4 = t.match(new RegExp(re.source + '[^\\d]{0,48}(?:(\\d{1,2})\\s*분)?\\s*(?:(\\d{1,2})\\s*초)','i'));
+        const pct = rm3 ? parseFloat(rm3[1].replace(',','.')) : null;
+        const sec = (rm4 && (rm4[1]||rm4[2])) ? ((rm4[1]?+rm4[1]*60:0)+(rm4[2]?+rm4[2]:0)) : null;
+        if(sec!=null || (pct>=0&&pct<=100)) hrZones[key] = { sec, pct: (pct>=0&&pct<=100)?pct:null };
       }
     }
   }
@@ -1029,7 +1087,22 @@ async function applyOcrToRecord(rec){
   if(!f || !f.dataUrl) return false;
   const text = await ocrImage(f.dataUrl);
   const p = parseTextMetrics(text);
+  // 재인식은 이미지 값을 진실로 — 예전 잘못된 17:49/심박65를 남기지 않음
+  ['distanceKm','durationSec','avgPaceSec','bestPaceSec','avgHr','hrMax','cadence','cadMax','calories'].forEach(k=>{
+    if(p[k]!=null) rec[k]=p[k];
+  });
   let changed = assignDetailMetrics(rec, p);
+  if(p.avgHr==null && rec.avgHr!=null && rec.avgHr<90){ rec.avgHr=null; changed=true; }
+  if(p.durationSec==null && rec.durationSec && rec.distanceKm && rec.durationSec/rec.distanceKm>720){
+    rec.durationSec = rec.avgPaceSec ? Math.round(rec.avgPaceSec*rec.distanceKm) : null;
+    changed = true;
+  }
+  reconcileRunMetrics(rec);
+  if(p.hrZones) rec.hrZones = p.hrZones;
+  else if(rec.hrZones && rec.durationSec){
+    const sum = Object.values(rec.hrZones).reduce((s,z)=>s+(z.sec||0),0);
+    if(sum > rec.durationSec*1.2){ rec.hrZones=null; changed=true; }
+  }
   const iso = parseDateFromText(text);
   if(iso){ rec.date = iso; changed = true; }
   const phases = parseIntervalPhases(text);
@@ -1040,11 +1113,8 @@ async function applyOcrToRecord(rec){
     if(splits.length>=2){
       rec.splits = splits; changed = true;
       const tot = splitsTotals(splits);
-      if(rec.avgHr==null && tot.avgHr!=null){ rec.avgHr = tot.avgHr; changed = true; }
-      if(rec.cadence==null && tot.cadence!=null){ rec.cadence = tot.cadence; changed = true; }
-      if(rec.distanceKm==null && tot.distanceKm!=null){ rec.distanceKm = tot.distanceKm; changed = true; }
-      if(rec.durationSec==null && tot.durationSec){ rec.durationSec = tot.durationSec; changed = true; }
-      if(rec.avgPaceSec==null && tot.avgPaceSec){ rec.avgPaceSec = tot.avgPaceSec; changed = true; }
+      if(rec.avgHr==null && tot.avgHr!=null) rec.avgHr = tot.avgHr;
+      if(rec.cadence==null && tot.cadence!=null) rec.cadence = tot.cadence;
     }
   }
   if(text){ rec.ocrText = text.slice(0, 8000); changed = true; }
@@ -1807,37 +1877,37 @@ function editRecord(id){
     <label class="f">훈련 종류</label>
     <select id="e_type">${opts}</select>
     <div class="inline">
-      <div><label class="f">거리 (km)</label><input type="number" step="0.01" id="e_dist" value="${r.distanceKm??''}" placeholder="10.0"></div>
-      <div><label class="f">시간 (분)</label><input type="number" step="0.1" id="e_dur" value="${r.durationSec?(r.durationSec/60).toFixed(1):''}" placeholder="52.5"></div>
+      <div><label class="f">거리 (km)</label><input type="number" step="0.01" id="e_dist" value="${r.distanceKm??''}" placeholder=""></div>
+      <div><label class="f">시간 (분)</label><input type="number" step="0.1" id="e_dur" value="${r.durationSec?(r.durationSec/60).toFixed(1):''}" placeholder=""></div>
     </div>
     <div class="inline">
-      <div><label class="f">평균 심박</label><input type="number" id="e_hr" value="${r.avgHr??''}" placeholder="150"></div>
-      <div><label class="f">최고 심박</label><input type="number" id="e_hrmax" value="${r.hrMax??''}" placeholder="180"></div>
+      <div><label class="f">평균 심박</label><input type="number" id="e_hr" value="${r.avgHr??''}" placeholder=""></div>
+      <div><label class="f">최고 심박</label><input type="number" id="e_hrmax" value="${r.hrMax??''}" placeholder=""></div>
     </div>
     <div class="inline">
-      <div><label class="f">케이던스</label><input type="number" id="e_cad" value="${r.cadence??''}" placeholder="180"></div>
-      <div><label class="f">칼로리</label><input type="number" id="e_cal" value="${r.calories??''}" placeholder="500"></div>
+      <div><label class="f">케이던스</label><input type="number" id="e_cad" value="${r.cadence??''}" placeholder=""></div>
+      <div><label class="f">칼로리</label><input type="number" id="e_cal" value="${r.calories??''}" placeholder=""></div>
     </div>
     <div class="inline">
-      <div><label class="f">지면 접촉 (ms)</label><input type="number" id="e_gct" value="${r.gctMs??''}" placeholder="280"></div>
-      <div><label class="f">보폭 (cm)</label><input type="number" id="e_stride" value="${r.strideCm??''}" placeholder="120"></div>
+      <div><label class="f">지면 접촉 (ms)</label><input type="number" id="e_gct" value="${r.gctMs??''}" placeholder=""></div>
+      <div><label class="f">보폭 (cm)</label><input type="number" id="e_stride" value="${r.strideCm??''}" placeholder=""></div>
     </div>
     <div class="inline">
-      <div><label class="f">수직 진폭 (cm)</label><input type="number" step="0.1" id="e_vo" value="${r.vertOscCm??''}" placeholder="7.5"></div>
-      <div><label class="f">수직 비 (%)</label><input type="number" step="0.1" id="e_vr" value="${r.vertRatioPct??''}" placeholder="10"></div>
+      <div><label class="f">수직 진폭 (cm)</label><input type="number" step="0.1" id="e_vo" value="${r.vertOscCm??''}" placeholder=""></div>
+      <div><label class="f">수직 비 (%)</label><input type="number" step="0.1" id="e_vr" value="${r.vertRatioPct??''}" placeholder=""></div>
     </div>
     <label class="f" style="margin-top:12px">심박 영역 시간 (분:초)</label>
     <div class="inline">
-      <div><label class="f">최고 강도</label><input id="e_z_peak" value="${zSec('peak')}" placeholder="7:16"></div>
-      <div><label class="f">고강도</label><input id="e_z_high" value="${zSec('high')}" placeholder="34:04"></div>
+      <div><label class="f">최고 강도</label><input id="e_z_peak" value="${zSec('peak')}" placeholder=""></div>
+      <div><label class="f">고강도</label><input id="e_z_high" value="${zSec('high')}" placeholder=""></div>
     </div>
     <div class="inline">
-      <div><label class="f">중강도</label><input id="e_z_mid" value="${zSec('mid')}" placeholder="10:28"></div>
-      <div><label class="f">집중·저강도</label><input id="e_z_focus" value="${zSec('focus')}" placeholder="4:51"></div>
+      <div><label class="f">중강도</label><input id="e_z_mid" value="${zSec('mid')}" placeholder=""></div>
+      <div><label class="f">집중·저강도</label><input id="e_z_focus" value="${zSec('focus')}" placeholder=""></div>
     </div>
     <div class="inline">
-      <div><label class="f">워밍업</label><input id="e_z_warmup" value="${zSec('warmup')}" placeholder="0:00"></div>
-      <div><label class="f">유산소 TE</label><input type="number" step="0.1" id="e_tea" value="${r.teAerobic??''}" placeholder="3.5"></div>
+      <div><label class="f">워밍업</label><input id="e_z_warmup" value="${zSec('warmup')}" placeholder=""></div>
+      <div><label class="f">유산소 TE</label><input type="number" step="0.1" id="e_tea" value="${r.teAerobic??''}" placeholder=""></div>
     </div>
     <label class="f">메모</label>
     <textarea id="e_notes" placeholder="느낌, 코스, 날씨 등">${r.notes||''}</textarea>
