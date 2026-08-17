@@ -6,7 +6,7 @@
 'use strict';
 
 /* 앱 버전 (sw.js 캐시 버전과 동일하게 유지) */
-const APP_VERSION = 'v28';
+const APP_VERSION = 'v31';
 
 /* ---------- 세션 타입 정의 ---------- */
 const TYPES = {
@@ -340,6 +340,120 @@ function classifyRun({distanceKm, avgPaceSec, avgHr, durationSec, hint, phases})
   return guessType(hint||'', distanceKm, avgPaceSec);
 }
 
+/* OCR 원문 정규화: Zepp/애플 흔한 오인식 보정 */
+function normalizeOcrText(text){
+  let t = String(text||'').replace(/\u00A0/g,' ');
+  t = t.replace(/[ⅠIl|]/g,'1');
+  // bpm/spm 변형
+  t = t.replace(/b\s*[pP]\s*[nmNM]/gi,'bpm').replace(/s\s*[pP]\s*[nmNM]/gi,'spm');
+  t = t.replace(/BPH|bprn|bpn|bpmn/gi,'bpm').replace(/SPN|sprn|spn|spnn/gi,'spm');
+  // 한글 라벨 깨짐
+  t = t.replace(/심\s*박\s*수?/g,'심박수').replace(/케\s*이\s*던\s*스|캐이던스|케이던쓰/g,'케이던스');
+  t = t.replace(/평\s*균/g,'평균').replace(/최\s*고/g,'최고').replace(/최\s*저/g,'최저');
+  t = t.replace(/페\s*이\s*스/g,'페이스').replace(/구\s*간/g,'구간');
+  t = t.replace(/킬\s*로\s*미\s*터/g,'킬로미터').replace(/거\s*리/g,'거리');
+  t = t.replace(/경\s*사\s*도/g,'경사도').replace(/오\s*르\s*막/g,'오르막').replace(/내\s*리\s*막/g,'내리막');
+  t = t.replace(/평\s*지/g,'평지').replace(/고\s*도/g,'고도').replace(/상\s*승/g,'상승').replace(/하\s*강/g,'하강');
+  t = t.replace(/비\s*행\s*시\s*간/g,'비행시간').replace(/보\s*폭/g,'보폭').replace(/분\s*포/g,'분포');
+  return t;
+}
+/* 라벨 근처 숫자 추출 (같은 줄·다음 줄·숫자 뒤 라벨) */
+function pickNearLabel(text, labelRe, min, max){
+  const lines = String(text||'').split(/[\n\r]+/);
+  const inRange = (n)=> n>=min && n<=max;
+  for(let i=0;i<lines.length;i++){
+    const line = lines[i];
+    if(!labelRe.test(line)) continue;
+    // 같은 줄: 라벨 뒤 숫자 우선, 없으면 앞
+    let m = line.match(new RegExp(labelRe.source + '[^\\d]{0,16}(\\d{2,3})','i'));
+    if(m && inRange(+m[1])) return +m[1];
+    m = line.match(new RegExp('(\\d{2,3})[^\\d]{0,12}' + labelRe.source,'i'));
+    if(m && inRange(+m[1])) return +m[1];
+    const same = [...line.matchAll(/(\d{2,3})(?!\d)/g)].map(x=>+x[1]).filter(inRange);
+    if(same.length) return same[0];
+    // 다음 1~2줄의 단독 숫자
+    for(let j=1;j<=2 && i+j<lines.length;j++){
+      const nm = lines[i+j].trim().match(/^(\d{2,3})\s*(?:b\s*p\s*m|s\s*p\s*m)?$/i);
+      if(nm && inRange(+nm[1])) return +nm[1];
+      const any = [...lines[i+j].matchAll(/(\d{2,3})(?!\d)/g)].map(x=>+x[1]).filter(inRange);
+      if(any.length===1) return any[0];
+    }
+  }
+  return null;
+}
+/* Zepp 경사도 분포: 급경사 오르막/오르막/평지/내리막/급경사 내리막 + % */
+function parseGradeDist(text){
+  const t = String(text||'');
+  const out = {};
+  const take = (key, re)=>{
+    if(out[key]!=null) return;
+    const m = t.match(re);
+    if(!m) return;
+    const pct = parseFloat(String(m[1]).replace(',','.'));
+    if(pct>=0 && pct<=100) out[key] = { pct };
+  };
+  // 급경사 먼저 (일반 오르막/내리막과 구분)
+  take('steepUp', /급\s*경사\s*오르막[^%\d]{0,24}(\d{1,3}(?:[.,]\d+)?)\s*%/i);
+  take('steepDown', /급\s*경사\s*내리막[^%\d]{0,24}(\d{1,3}(?:[.,]\d+)?)\s*%/i);
+  // 일반 오르막/내리막: '급경사'가 붙지 않은 경우만
+  for(const mm of t.matchAll(/(^|[^급])\s*오르막[^%\d]{0,24}(\d{1,3}(?:[.,]\d+)?)\s*%/gi)){
+    if(out.up==null){ const pct=parseFloat(String(mm[2]).replace(',','.')); if(pct>=0&&pct<=100) out.up={pct}; }
+  }
+  for(const mm of t.matchAll(/(^|[^급])\s*내리막[^%\d]{0,24}(\d{1,3}(?:[.,]\d+)?)\s*%/gi)){
+    if(out.down==null){ const pct=parseFloat(String(mm[2]).replace(',','.')); if(pct>=0&&pct<=100) out.down={pct}; }
+  }
+  take('flat', /평지[^%\d]{0,24}(\d{1,3}(?:[.,]\d+)?)\s*%/i);
+  // 영문/퍼센트 구간 표기
+  take('steepUp', /(?:steep\s*up|>\s*6\s*%|≥\s*6\s*%|10\s*%\s*(?:이상)?)\D{0,16}(\d{1,3}(?:[.,]\d+)?)\s*%/i);
+  take('up', /(?:uphill|2\s*[~～\-]\s*6\s*%|5\s*[~～\-]\s*10\s*%)\D{0,16}(\d{1,3}(?:[.,]\d+)?)\s*%/i);
+  take('flat', /(?:flat|0\s*[~～\-]\s*2\s*%|\-\s*2\s*[~～\-]\s*2\s*%)\D{0,16}(\d{1,3}(?:[.,]\d+)?)\s*%/i);
+  take('down', /(?:downhill|\-\s*6\s*[~～\-]\s*\-\s*2|\-\s*5\s*[~～\-]\s*0)\D{0,16}(\d{1,3}(?:[.,]\d+)?)\s*%/i);
+  take('steepDown', /(?:steep\s*down|<\s*\-\s*6|≤\s*\-\s*6)\D{0,16}(\d{1,3}(?:[.,]\d+)?)\s*%/i);
+  // 거리(km)가 % 대신 있는 경우 — 합으로 % 환산
+  if(!Object.keys(out).length){
+    const kmMap = {};
+    const kmRules = [
+      ['steepUp', /급\s*경사\s*오르막[^0-9]{0,20}(\d{1,2}(?:[.,]\d{1,2})?)\s*(?:k\s*m|킬로)/i],
+      ['up', /오르막[^0-9]{0,20}(\d{1,2}(?:[.,]\d{1,2})?)\s*(?:k\s*m|킬로)/i],
+      ['flat', /평지[^0-9]{0,20}(\d{1,2}(?:[.,]\d{1,2})?)\s*(?:k\s*m|킬로)/i],
+      ['down', /내리막[^0-9]{0,20}(\d{1,2}(?:[.,]\d{1,2})?)\s*(?:k\s*m|킬로)/i],
+      ['steepDown', /급\s*경사\s*내리막[^0-9]{0,20}(\d{1,2}(?:[.,]\d{1,2})?)\s*(?:k\s*m|킬로)/i]
+    ];
+    let sum = 0;
+    for(const [k,re] of kmRules){
+      const m = t.match(re); if(!m) continue;
+      const v = parseFloat(m[1].replace(',','.')); if(!(v>0&&v<100)) continue;
+      kmMap[k]=v; sum+=v;
+    }
+    if(sum>0){
+      Object.keys(kmMap).forEach(k=>{ out[k]={ pct: Math.round(kmMap[k]/sum*1000)/10, km: kmMap[k] }; });
+    }
+  }
+  // 라벨·%가 줄바꿈으로 갈라진 경우
+  if(Object.keys(out).length < 3){
+    const lines = t.split(/[\n\r]+/);
+    const tryLine = (key, re)=>{
+      if(out[key]!=null) return;
+      for(let i=0;i<lines.length;i++){
+        if(!re.test(lines[i])) continue;
+        const blob = lines[i]+' '+(lines[i+1]||'')+' '+(lines[i+2]||'');
+        const pm = blob.match(/(\d{1,3}(?:[.,]\d+)?)\s*%/);
+        if(!pm) continue;
+        const pct = parseFloat(pm[1].replace(',','.'));
+        if(pct>=0&&pct<=100){ out[key]={ pct }; return; }
+      }
+    };
+    tryLine('steepUp', /급\s*경사\s*오르막/);
+    tryLine('steepDown', /급\s*경사\s*내리막/);
+    tryLine('up', /오르막/);
+    tryLine('down', /내리막/);
+    tryLine('flat', /평지/);
+    // '오르막'이 급경사를 다시 잡았을 수 있음 — steep가 있으면 up 재확인
+    if(out.steepUp && out.up && out.steepUp.pct===out.up.pct) delete out.up;
+    if(out.steepDown && out.down && out.steepDown.pct===out.down.pct) delete out.down;
+  }
+  return Object.keys(out).length ? out : null;
+}
 /* 자유 텍스트/OCR 결과에서 수치 추출 (애플 피트니스·Strava·Garmin·Zepp 형식 대응) */
 function parseDurToken(str){
   const m = String(str||'').match(/(\d{1,2})\s*:\s*(\d{2})/);
@@ -348,7 +462,7 @@ function parseDurToken(str){
 }
 function parseTextMetrics(text){
   const out = {};
-  const t = (text||'').replace(/\u00A0/g,' ').replace(/[Ⅰl|]/g,'1'); // 흔한 OCR 혼동 보정(약하게)
+  const t = normalizeOcrText(text);
   // 거리: km/킬로 값 중 최댓값(총거리)
   let dist = 0;
   for(const mm of t.matchAll(/(\d{1,3}[.,]\d{1,2})\s*(?:k\s*m|킬로)/gi)){
@@ -356,47 +470,95 @@ function parseTextMetrics(text){
   }
   if(!dist){ const one = t.match(/(\d{1,3}[.,]\d{1,2})\s*(?:k\s*m|킬로)/i); if(one) dist=parseFloat(one[1].replace(',','.')); }
   if(dist>0) out.distanceKm = dist;
-  // 시간: h:mm:ss 우선 (스플릿의 mm:ss는 오인 방지 위해 사용 안 함)
+  // 시간: h:mm:ss 우선 → 한글 → Zepp 요약의 mm:ss(운동시간/총시간 라벨 근처만)
   let m = t.match(/(\d{1,2}):(\d{2}):(\d{2})/);
   if(m){ out.durationSec = (+m[1])*3600+(+m[2])*60+(+m[3]); }
   else {
     const hh = t.match(/(\d{1,2})\s*시간/), mn = t.match(/(\d{1,3})\s*분/), ss = t.match(/(\d{1,2})\s*초/);
     if(hh||mn){ out.durationSec = (hh?+hh[1]*3600:0)+(mn?+mn[1]*60:0)+(ss?+ss[1]:0); }
+    else {
+      const dm = t.match(/(?:운동\s*시간|총\s*시간|소요\s*시간|duration|time)\D{0,12}(\d{1,2})\s*:\s*(\d{2})(?!\s*:\s*\d)/i);
+      if(dm){ const s=(+dm[1])*60+(+dm[2]); if(s>=60&&s<=5*3600) out.durationSec=s; }
+    }
   }
   // 페이스: m'ss"/km, m:ss/km, m′ss″ 등 (첫 매치 = 평균)
   m = t.match(/(\d{1,2})\s*['’‘`´′:]\s*(\d{2})\s*["”“''′″]?\s*\/?\s*k\s*m/i)
-    || t.match(/페이스\D{0,6}(\d{1,2})\D(\d{2})/);
+    || t.match(/(?:평균\s*)?페이스\D{0,8}(\d{1,2})\s*['’‘`´′:]\s*(\d{2})/);
   if(m){ const s=(+m[1])*60+(+m[2]); if(s>=120&&s<=1200) out.avgPaceSec=s; }
   // 최고 페이스
   m = t.match(/(?:최고|베스트|best)\s*페이스\D{0,8}(\d{1,2})\s*['’‘`´′:]\s*(\d{2})/i);
   if(m){ const s=(+m[1])*60+(+m[2]); if(s>=120&&s<=1200) out.bestPaceSec=s; }
-  // 심박: 평균 / 최고
-  m = t.match(/평균\s*심박\D{0,8}(\d{2,3})/i) || t.match(/(\d{2,3})\s*bpm/i) || t.match(/(?:심박|hr)\D{0,5}(\d{2,3})/i);
+  // 심박: 평균 / 최고 (Zepp: "심박수 168" / 세로 배치)
+  m = t.match(/평균\s*심박(?:수)?\D{0,12}(\d{2,3})/i)
+    || t.match(/심박(?:수)?\D{0,8}평균\D{0,8}(\d{2,3})/i)
+    || t.match(/(\d{2,3})\s*bpm/i)
+    || t.match(/심박(?:수)?\D{0,8}(\d{2,3})/i);
   if(m){ const v=+m[1]; if(v>=60&&v<=230) out.avgHr=v; }
-  m = t.match(/최고\s*심박\D{0,8}(\d{2,3})/i) || t.match(/max(?:imum)?\s*h(?:eart)?\s*r(?:ate)?\D{0,8}(\d{2,3})/i);
+  if(out.avgHr==null){ const v=pickNearLabel(t, /심박(?:수)?|heart\s*rate|\bHR\b/i, 60, 230); if(v!=null) out.avgHr=v; }
+  m = t.match(/최고\s*심박(?:수)?\D{0,12}(\d{2,3})/i)
+    || t.match(/심박(?:수)?\D{0,8}최고\D{0,8}(\d{2,3})/i)
+    || t.match(/max(?:imum)?\s*h(?:eart)?\s*r(?:ate)?\D{0,8}(\d{2,3})/i);
   if(m){ const v=+m[1]; if(v>=60&&v<=230) out.hrMax=v; }
   // 케이던스: 평균 / 최고
-  m = t.match(/평균\s*케이던스\D{0,8}(\d{2,3})/i) || t.match(/(\d{2,3})\s*spm/i) || t.match(/(?:케이던스|cadence)\D{0,5}(\d{2,3})/i);
-  if(m){ const v=+m[1]; if(v>=120&&v<=260) out.cadence=v; }
-  m = t.match(/최고\s*케이던스\D{0,8}(\d{2,3})/i);
-  if(m){ const v=+m[1]; if(v>=120&&v<=260) out.cadMax=v; }
+  m = t.match(/평균\s*케이던스\D{0,12}(\d{2,3})/i)
+    || t.match(/케이던스\D{0,8}평균\D{0,8}(\d{2,3})/i)
+    || t.match(/(\d{2,3})\s*spm/i)
+    || t.match(/케이던스\D{0,8}(\d{2,3})/i)
+    || t.match(/cadence\D{0,8}(\d{2,3})/i);
+  if(m){ const v=+m[1]; if(v>=100&&v<=260) out.cadence=v; }
+  if(out.cadence==null){ const v=pickNearLabel(t, /케이던스|cadence/i, 100, 260); if(v!=null) out.cadence=v; }
+  m = t.match(/최고\s*케이던스\D{0,12}(\d{2,3})/i)
+    || t.match(/케이던스\D{0,8}최고\D{0,8}(\d{2,3})/i);
+  if(m){ const v=+m[1]; if(v>=100&&v<=260) out.cadMax=v; }
   // 칼로리
-  m = t.match(/(\d{2,4})\s*k\s*cal/i);
+  m = t.match(/(\d{2,4})\s*k\s*cal/i) || t.match(/(?:칼로리|열량)\D{0,8}(\d{2,4})/i);
   if(m) out.calories = +m[1];
-  // 지면 접촉 시간 (ms)
+  // 지면 접촉 시간 (ms) · 최고
   m = t.match(/지면\s*접촉\s*시간\D{0,24}(\d{2,4})\s*m\s*s/i)
     || t.match(/(?:ground\s*contact|GCT|stance\s*time)\D{0,16}(\d{2,4})\s*m\s*s/i);
   if(m){ const v=+m[1]; if(v>=150&&v<=500) out.gctMs=v; }
+  m = t.match(/최고\s*지면\s*접촉\s*시간\D{0,16}(\d{2,4})\s*m\s*s/i)
+    || t.match(/지면\s*접촉\s*시간\D{0,40}최고\D{0,12}(\d{2,4})\s*m\s*s/i);
+  if(m){ const v=+m[1]; if(v>=150&&v<=500) out.gctMaxMs=v; }
   m = t.match(/지면\s*접촉\s*시간\s*밸런스\D{0,20}(\d{1,2}(?:[.,]\d+)?)\s*%?\s*[\/L좌]?\D{0,8}(\d{1,2}(?:[.,]\d+)?)\s*%/i);
   if(m){ out.gctBalanceL=parseFloat(m[1].replace(',','.')); out.gctBalanceR=parseFloat(m[2].replace(',','.')); }
-  // 보폭 (cm → m 저장은 cm로 통일)
-  m = t.match(/보폭\D{0,20}(\d{2,3})\s*cm/i) || t.match(/stride\D{0,12}(\d{2,3})\s*cm/i);
+  // 비행 시간
+  m = t.match(/비행\s*시간\D{0,20}(\d{2,3})\s*m\s*s/i) || t.match(/flight\s*time\D{0,16}(\d{2,3})\s*m\s*s/i);
+  if(m){ const v=+m[1]; if(v>=20&&v<=200) out.flightMs=v; }
+  m = t.match(/최고\s*비행\s*시간\D{0,16}(\d{2,3})\s*m\s*s/i);
+  if(m){ const v=+m[1]; if(v>=20&&v<=200) out.flightMaxMs=v; }
+  // 보폭 (cm) — 라벨 근처·cm 생략 허용
+  m = t.match(/평균\s*보폭\D{0,16}(\d{2,3})\s*c?\s*m?/i)
+    || t.match(/보폭\D{0,20}(\d{2,3})\s*cm/i)
+    || t.match(/stride\D{0,12}(\d{2,3})\s*cm/i);
   if(m){ const v=+m[1]; if(v>=40&&v<=200) out.strideCm=v; }
-  m = t.match(/최고\s*보폭\D{0,12}(\d{2,3})\s*cm/i);
+  if(out.strideCm==null){ const v=pickNearLabel(t, /보폭|stride/i, 40, 200); if(v!=null) out.strideCm=v; }
+  m = t.match(/최고\s*보폭\D{0,12}(\d{2,3})\s*c?\s*m?/i)
+    || t.match(/보폭\D{0,24}최고\D{0,12}(\d{2,3})/i);
   if(m){ const v=+m[1]; if(v>=40&&v<=200) out.strideMaxCm=v; }
+  // 고도 · 상승/하강
+  m = t.match(/(?:총\s*)?(?:누적\s*)?상승(?:\s*고도)?\D{0,16}(\d{1,4})\s*m(?!\s*s)/i)
+    || t.match(/(?:total\s*)?ascent\D{0,12}(\d{1,4})\s*m/i)
+    || t.match(/상승\D{0,8}(\d{1,4})\s*m(?!\s*s)/i);
+  if(m){ const v=+m[1]; if(v>=0&&v<=9000) out.ascentM=v; }
+  m = t.match(/(?:총\s*)?(?:누적\s*)?하강(?:\s*고도)?\D{0,16}(\d{1,4})\s*m(?!\s*s)/i)
+    || t.match(/(?:total\s*)?descent\D{0,12}(\d{1,4})\s*m/i)
+    || t.match(/하강\D{0,8}(\d{1,4})\s*m(?!\s*s)/i);
+  if(m){ const v=+m[1]; if(v>=0&&v<=9000) out.descentM=v; }
+  m = t.match(/최고\s*고도\D{0,12}(\d{1,4})\s*m/i) || t.match(/max(?:imum)?\s*(?:elev|alt)\D{0,12}(\d{1,4})\s*m/i);
+  if(m){ const v=+m[1]; if(v>=-100&&v<=9000) out.elevMaxM=v; }
+  m = t.match(/최저\s*고도\D{0,12}(\d{1,4})\s*m/i) || t.match(/min(?:imum)?\s*(?:elev|alt)\D{0,12}(\d{1,4})\s*m/i);
+  if(m){ const v=+m[1]; if(v>=-100&&v<=9000) out.elevMinM=v; }
+  // VO2 Max
+  m = t.match(/VO2\s*Max\D{0,10}(\d{2}(?:[.,]\d)?)/i) || t.match(/최대\s*산소\s*섭취\D{0,10}(\d{2}(?:[.,]\d)?)/i);
+  if(m){ const v=parseFloat(m[1].replace(',','.')); if(v>=20&&v<=90) out.vo2max=v; }
+  // 경사도 분포
+  const gd = parseGradeDist(t);
+  if(gd) out.gradeDist = gd;
   // 수직 진폭 / 수직 비
   m = t.match(/수직\s*진폭\D{0,16}(\d{1,2}(?:[.,]\d+)?)\s*cm/i);
   if(m) out.vertOscCm = parseFloat(m[1].replace(',','.'));
+  if(out.vertOscCm==null){ const v=pickNearLabel(t, /수직\s*진폭|vertical\s*osc/i, 3, 20); if(v!=null) out.vertOscCm=v; }
   m = t.match(/수직\s*비\D{0,16}(\d{1,2}(?:[.,]\d+)?)\s*%/i);
   if(m) out.vertRatioPct = parseFloat(m[1].replace(',','.'));
   // 훈련 효과
@@ -407,10 +569,10 @@ function parseTextMetrics(text){
   // 심박 영역(Zepp): 최고/고/중/저(집중)·워밍업 — 시간·비율
   const hrZones = {};
   const zoneRules = [
-    ['peak',   /최고\s*강도|peak/i],
-    ['high',   /고\s*강도(?!\s*훈련\s*효과)|anaerobic|intensive/i],
-    ['mid',    /중\s*강도|aerobic(?!\s*effect)|moderate/i],
-    ['focus',  /저\s*강도|집중\s*훈련|fat\s*burn|지방\s*연소/i],
+    ['peak',   /최고\s*강도|무\s*산소(?!\s*소모)|peak|anaerobic/i],
+    ['high',   /고\s*강도(?!\s*훈련\s*효과)|유\s*산소\s*강도|intensive/i],
+    ['mid',    /중\s*강도|집중(?!\s*훈련)|aerobic(?!\s*effect)|moderate/i],
+    ['focus',  /저\s*강도|집중\s*훈련|지방\s*연소|fat\s*burn/i],
     ['warmup', /워\s*밍\s*업|warm\s*-?\s*up/i]
   ];
   for(const [key, re] of zoneRules){
@@ -422,6 +584,10 @@ function parseTextMetrics(text){
     } else {
       const rm2 = t.match(new RegExp(re.source + '[^\\d%]{0,40}(\\d{1,2}\\s*:\\s*\\d{2})','i'));
       if(rm2){ const sec=parseDurToken(rm2[1]); if(sec!=null) hrZones[key]={ sec, pct:null }; }
+      else {
+        const rm3 = t.match(new RegExp(re.source + '[^\\d%]{0,40}(\\d{1,3})\\s*%','i'));
+        if(rm3){ const pct=+rm3[1]; if(pct>=0&&pct<=100) hrZones[key]={ sec:null, pct }; }
+      }
     }
   }
   if(Object.keys(hrZones).length) out.hrZones = hrZones;
@@ -442,9 +608,10 @@ function parseTextMetrics(text){
 
 const DETAIL_METRIC_KEYS = [
   'distanceKm','durationSec','avgPaceSec','bestPaceSec','avgHr','hrMin','hrMax',
-  'cadence','cadMin','cadMax','calories','gctMs','gctBalanceL','gctBalanceR',
-  'strideCm','strideMaxCm','vertOscCm','vertRatioPct','teAerobic','teAnaerobic',
-  'hrZones','paceFast','paceSlow'
+  'cadence','cadMin','cadMax','calories','gctMs','gctMaxMs','gctBalanceL','gctBalanceR',
+  'flightMs','flightMaxMs','strideCm','strideMaxCm','vertOscCm','vertRatioPct',
+  'teAerobic','teAnaerobic','hrZones','paceFast','paceSlow',
+  'ascentM','descentM','elevMaxM','elevMinM','vo2max','gradeDist'
 ];
 function assignDetailMetrics(target, src){
   let changed = false;
@@ -454,33 +621,119 @@ function assignDetailMetrics(target, src){
   return changed;
 }
 
-/* 스플릿(구간) 표 파싱: "1 04:50 4'50"/KM 155BPM 175SPM" 행들을 추출 */
+/* 분포 스택 바 · 시계열 스파크라인 (이미지 그래프를 수치로 재구성) */
+function distStackHtml(parts){
+  const items = (parts||[]).filter(p=>p && p.pct!=null && p.pct>0);
+  if(!items.length) return '';
+  const bars = items.map(p=>`<i style="flex:${Math.max(p.pct,0.4)};background:${p.color}" title="${p.label} ${p.pct}%"></i>`).join('');
+  const legend = items.map(p=>`<span><i style="background:${p.color}"></i>${p.label} <b>${p.pct}%</b>${p.extra?` · ${p.extra}`:''}</span>`).join('');
+  return `<div class="dist-stack">${bars}</div><div class="dist-legend">${legend}</div>`;
+}
+function seriesSvg(values, color, opts){
+  const h = (opts&&opts.h)||58;
+  const vals = (values||[]).map(v=> (v==null||!isFinite(v))?null:+v);
+  const nums = vals.filter(v=>v!=null);
+  if(nums.length<2) return '';
+  const min = Math.min(...nums), max = Math.max(...nums);
+  const span = Math.max(1e-6, max-min);
+  const w = 300, n = vals.length;
+  const pts = [];
+  vals.forEach((v,i)=>{
+    if(v==null) return;
+    const x = n===1 ? w/2 : (i/(n-1))*w;
+    const y = h - ((v-min)/span)*(h-10) - 5;
+    pts.push(`${x.toFixed(1)},${y.toFixed(1)}`);
+  });
+  if(pts.length<2) return '';
+  return `<div class="spark-wrap"><svg viewBox="0 0 ${w} ${h}" class="spark-svg" preserveAspectRatio="none">
+    <polyline fill="none" stroke="${color}" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" points="${pts.join(' ')}"/>
+  </svg>${opts&&opts.caption?`<div class="spark-cap">${opts.caption}</div>`:''}</div>`;
+}
+function rangeBarHtml(min, avg, max, color, unit){
+  if(avg==null && (min==null||max==null)) return '';
+  const a = avg!=null?avg:(min!=null&&max!=null?(min+max)/2:null);
+  const lo = min!=null?min:(a!=null?a*0.92:null);
+  const hi = max!=null?max:(a!=null?a*1.08:null);
+  if(lo==null||hi==null||a==null) return `<div class="note">${avg!=null?`평균 ${avg}${unit||''}`:''}</div>`;
+  const span = Math.max(1, hi-lo);
+  const pct = Math.max(0, Math.min(100, ((a-lo)/span)*100));
+  return `<div class="range-bar"><i style="left:${pct}%;background:${color}"></i></div>
+    <div class="range-lab"><span>${lo}${unit||''}</span><span style="color:${color};font-weight:800">${a}${unit||''}</span><span>${hi}${unit||''}</span></div>`;
+}
+
+/* 스플릿(구간) 표 파싱: Zepp "1 5'08" 5'08" 162 163" / 애플 "1 04:50 4'50" 155BPM 175SPM" */
 function parseSplits(text){
-  // 줄 단위 관대한 파서: 한 줄에 '구간시간(mm:ss)'과 '페이스(m'ss")'가 있으면 스플릿 행으로 인식
-  // (BPM/SPM 글자를 OCR이 틀려도 인식되도록, 심박·케이던스는 있으면 채움)
   const rows = [];
-  const lines = (text||'').replace(/\u00A0/g,' ').split(/[\n\r]+/);
+  const seen = new Set();
+  const pushRow = (tSec, pace, hr, cad, kmHint)=>{
+    if(!(tSec>=12 && tSec<=1200 && pace>=120 && pace<=1200)) return;
+    if(hr!=null && !(hr>=70 && hr<=230)) hr=null;
+    if(cad!=null && !(cad>=100 && cad<=260)) cad=null;
+    // 심박·케이던스 자리 바뀜 보정 (케이던스가 심박보다 작게 나온 경우 등)
+    if(hr!=null && cad!=null && cad<120 && hr>=140 && hr<=200){ /* keep */ }
+    if(hr!=null && cad!=null && hr>=100 && hr<=130 && cad>=150 && cad<=210){
+      // 가끔 OCR이 순서를 바꿈: 작은 값이 심박·큰 값이 케이던스가 정상
+    }
+    const km = kmHint!=null ? kmHint : +((tSec/pace).toFixed(3));
+    const key = `${Math.round(tSec)}|${Math.round(pace)}|${hr||0}|${cad||0}`;
+    if(seen.has(key)) return;
+    seen.add(key);
+    rows.push({ tSec, pace, hr, cad, km });
+  };
+  const t = normalizeOcrText(text||'');
+  const lines = t.split(/[\n\r]+/);
   for(const raw of lines){
     const line = raw.trim(); if(!line || rows.length>=80) continue;
-    // 시간형 토큰(m:ss / m'ss" 등) 모두 추출
-    const toks = [...line.matchAll(/(\d{1,2})\s*[:'’‘`´′″"]\s*(\d{2})(?!\d)/g)];
-    if(toks.length < 2) continue;                 // 시간 + 페이스, 최소 2개 필요
-    const tSec = (+toks[0][1])*60 + (+toks[0][2]); // 첫 토큰 = 구간 시간
-    const pace = (+toks[1][1])*60 + (+toks[1][2]); // 둘째 토큰 = 페이스
-    if(!(tSec>=15 && tSec<=1200 && pace>=120 && pace<=1200)) continue;
-    // 심박(bpm)·케이던스(spm): 라벨이 있으면 우선, 없으면 남은 2~3자리 숫자로 추정
-    let hr=null, cad=null;
-    const bpm = line.match(/(\d{2,3})\s*b\s*p\s*m/i); if(bpm) hr=+bpm[1];
-    const spm = line.match(/(\d{2,3})\s*s\s*p\s*m/i); if(spm) cad=+spm[1];
-    if(hr==null || cad==null){
-      const nums=[...line.matchAll(/(\d{2,3})(?!\d)/g)].map(x=>+x[1])
-        .filter(n=>n>=90 && n<=210);               // 심박/케이던스 대역
-      for(const n of nums){
-        if(hr==null && n>=90 && n<=200){ hr=n; continue; }
-        if(cad==null && n>=120 && n<=210){ cad=n; }
+    // Zepp 전용: [km] 구간시간 [페이스] 심박 케이던스 (bpm/spm 없어도 OK)
+    let zm = line.match(/^(?:(\d{1,2}(?:[.,]\d{1,2})?)\s*(?:k\s*m|킬로)?\s+)?(\d{1,2})\s*['’‘`´′:]\s*(\d{2})\s*["”“''′″]?\s+(?:(\d{1,2})\s*['’‘`´′:]\s*(\d{2})\s*["”“''′″]?\s+)?(\d{2,3})\s*(?:bpm)?\s+(\d{2,3})\s*(?:spm)?\s*$/i);
+    if(zm){
+      const tSec = (+zm[2])*60+(+zm[3]);
+      const pace = zm[4]!=null ? (+zm[4])*60+(+zm[5]) : tSec;
+      let hr=+zm[6], cad=+zm[7];
+      // 값이 케이던스 대역만 두 개면 순서 유지: 보통 심박≤케이던스인 경우가 많진 않음 — 범위로 판별
+      if(hr>=100 && cad>=100){
+        // 첫 숫자가 심박(보통 140~190), 둘째가 케이던스(150~180) — 그대로
+        if(hr>210 || (cad<100)){ const tmp=hr; hr=cad; cad=tmp; }
       }
+      const kmHint = zm[1]!=null ? parseFloat(String(zm[1]).replace(',','.')) : null;
+      pushRow(tSec, pace, hr, cad, (kmHint!=null && kmHint>0 && kmHint<=1.5)?kmHint:null);
+      continue;
     }
-    rows.push({ tSec, pace, hr, cad, km:+((tSec/pace).toFixed(3)) });
+    // 줄 단위 관대한 파서: 한 줄에 시간형 토큰 2개 + 심박/케이던스
+    const toks = [...line.matchAll(/(\d{1,2})\s*[:'’‘`´′″"]\s*(\d{2})(?!\d)/g)];
+    if(toks.length >= 1){
+      const tSec = (+toks[0][1])*60 + (+toks[0][2]);
+      const pace = toks.length>=2 ? (+toks[1][1])*60 + (+toks[1][2]) : tSec;
+      if(!(tSec>=12 && tSec<=1200 && pace>=120 && pace<=1200)) continue;
+      let hr=null, cad=null;
+      const bpm = line.match(/(\d{2,3})\s*bpm/i); if(bpm) hr=+bpm[1];
+      const spm = line.match(/(\d{2,3})\s*spm/i); if(spm) cad=+spm[1];
+      if(hr==null || cad==null){
+        // 시간 토큰 이후 남은 2~3자리 숫자 (구간번호·초 제외)
+        const after = line.slice(toks[toks.length-1].index + toks[toks.length-1][0].length);
+        const nums = [...after.matchAll(/(\d{2,3})(?!\d)/g)].map(x=>+x[1]);
+        for(const n of nums){
+          if(hr==null && n>=70 && n<=230){ hr=n; continue; }
+          if(cad==null && n>=100 && n<=260){ cad=n; }
+        }
+      }
+      // 시간 토큰이 1개뿐이고 hr/cad가 있으면 페이스=구간시간으로 간주(완전 km)
+      if(toks.length===1 && (hr!=null||cad!=null) && !(tSec>=120 && tSec<=1200)){
+        // tSec이 페이스 대역이 아니면 스킵했을 수 있음 — 위에서 pace=tSec로 이미 처리
+      }
+      if(toks.length>=2 || hr!=null || cad!=null){
+        pushRow(tSec, pace, hr, cad, null);
+      }
+      continue;
+    }
+  }
+  // 전체 텍스트 글로벌 스캔: 줄바꿈으로 깨진 표 복구
+  if(rows.length < 2){
+    const re = /(\d{1,2})\s*['’‘`´′:]\s*(\d{2})\s*["”“''′″]?\s+(\d{1,2})\s*['’‘`´′:]\s*(\d{2})\s*["”“''′″]?\s+(\d{2,3})\s+(\d{2,3})/g;
+    let gm;
+    while((gm = re.exec(t)) && rows.length<80){
+      pushRow((+gm[1])*60+(+gm[2]), (+gm[3])*60+(+gm[4]), +gm[5], +gm[6], null);
+    }
   }
   return rows;
 }
@@ -559,16 +812,16 @@ function preprocessForOCR(dataUrl){
     const img = new Image();
     img.onload = ()=>{
       try{
-        const targetW = 1600;
-        const scale = img.width < targetW ? Math.min(targetW/img.width, 2.5) : 1;
+        const targetW = 1800;
+        const scale = img.width < targetW ? Math.min(targetW/img.width, 3) : Math.min(1800/img.width, 1.25);
         const w = Math.round(img.width*scale), h = Math.round(img.height*scale);
         const cv = document.createElement('canvas'); cv.width=w; cv.height=h;
         const ctx = cv.getContext('2d', { willReadFrequently:true });
         ctx.drawImage(img, 0, 0, w, h);
         const id = ctx.getImageData(0,0,w,h), d = id.data;
         let sum=0; for(let i=0;i<d.length;i+=4){ sum += 0.299*d[i]+0.587*d[i+1]+0.114*d[i+2]; }
-        const dark = (sum/(d.length/4)) < 128;     // 배경이 어두우면 반전
-        const contrast = 1.7, mid = 128;
+        const dark = (sum/(d.length/4)) < 140;
+        const contrast = dark ? 1.85 : 1.35, mid = 128;
         for(let i=0;i<d.length;i+=4){
           let g = 0.299*d[i]+0.587*d[i+1]+0.114*d[i+2];
           if(dark) g = 255 - g;
@@ -584,13 +837,61 @@ function preprocessForOCR(dataUrl){
     img.src = dataUrl;
   });
 }
-async function ocrImage(dataUrl){
-  await ensureOCR();
-  let src = dataUrl;
-  try{ src = await preprocessForOCR(dataUrl); }catch(e){}
-  // 한국어+영어: '7월 13일' 같은 날짜와 라벨까지 인식
+/* 긴 스크린샷을 세로 타일로 나눠 OCR (하단 구간표 누락 방지) */
+function makeOcrTiles(dataUrl){
+  return new Promise((resolve)=>{
+    const img = new Image();
+    img.onload = ()=>{
+      try{
+        const tiles = [dataUrl];
+        // 세로가 가로의 2.2배 이상이면 겹치는 타일 생성
+        if(img.height > img.width * 2.2){
+          const tileH = Math.round(img.width * 1.6);
+          const step = Math.round(tileH * 0.72);
+          for(let y=0; y<img.height; y+=step){
+            const h = Math.min(tileH, img.height - y);
+            if(h < 80) break;
+            const cv = document.createElement('canvas');
+            cv.width = img.width; cv.height = h;
+            const ctx = cv.getContext('2d');
+            ctx.drawImage(img, 0, y, img.width, h, 0, 0, img.width, h);
+            tiles.push(cv.toDataURL('image/jpeg', 0.92));
+            if(y + h >= img.height) break;
+          }
+        }
+        resolve(tiles);
+      }catch(e){ resolve([dataUrl]); }
+    };
+    img.onerror = ()=> resolve([dataUrl]);
+    img.src = dataUrl;
+  });
+}
+async function ocrOne(src){
   const { data } = await Tesseract.recognize(src, 'kor+eng');
   return data && data.text ? data.text : '';
+}
+async function ocrImage(dataUrl){
+  await ensureOCR();
+  let pre = dataUrl;
+  try{ pre = await preprocessForOCR(dataUrl); }catch(e){}
+  const texts = [];
+  try{
+    const tiles = await makeOcrTiles(pre);
+    for(const tile of tiles){
+      try{ const tx = await ocrOne(tile); if(tx) texts.push(tx); }catch(e){}
+    }
+  }catch(e){}
+  if(!texts.length){
+    try{ texts.push(await ocrOne(pre)); }catch(e){}
+  }
+  // 원본 1패스 보강 (전처리가 밝은 Zepp UI를 망가뜨린 경우)
+  if(texts.join('').length < 80 || !/심박|케이던스|bpm|spm|페이스|경사|고도|보폭/i.test(texts.join('\n'))){
+    try{
+      const raw = await ocrOne(dataUrl);
+      if(raw) texts.push(raw);
+    }catch(e){}
+  }
+  return normalizeOcrText(texts.join('\n'));
 }
 /* 텍스트에서 날짜 추출 (애플/한국어/숫자 형식) */
 function mkDateISO(y, mo, d){
@@ -620,10 +921,25 @@ async function applyOcrToRecord(rec){
   let changed = assignDetailMetrics(rec, p);
   const iso = parseDateFromText(text);
   if(iso){ rec.date = iso; changed = true; }
+  const phases = parseIntervalPhases(text);
+  if(isPhaseWorkout(phases)){
+    rec.phases = phases; changed = true;
+  } else {
+    const splits = parseSplits(text);
+    if(splits.length>=2){
+      rec.splits = splits; changed = true;
+      const tot = splitsTotals(splits);
+      if(rec.avgHr==null && tot.avgHr!=null){ rec.avgHr = tot.avgHr; changed = true; }
+      if(rec.cadence==null && tot.cadence!=null){ rec.cadence = tot.cadence; changed = true; }
+      if(rec.distanceKm==null && tot.distanceKm!=null){ rec.distanceKm = tot.distanceKm; changed = true; }
+      if(rec.durationSec==null && tot.durationSec){ rec.durationSec = tot.durationSec; changed = true; }
+      if(rec.avgPaceSec==null && tot.avgPaceSec){ rec.avgPaceSec = tot.avgPaceSec; changed = true; }
+    }
+  }
+  if(text){ rec.ocrText = text.slice(0, 8000); changed = true; }
   if(changed){
-    rec.type = classifyRun({distanceKm:rec.distanceKm, durationSec:rec.durationSec, avgPaceSec:rec.avgPaceSec, avgHr:rec.avgHr, hint:(rec.notes||'')+' '+(rec.fileName||'')+' '+text}) || rec.type;
+    rec.type = classifyRun({distanceKm:rec.distanceKm, durationSec:rec.durationSec, avgPaceSec:rec.avgPaceSec, avgHr:rec.avgHr, phases:rec.phases, hint:(rec.notes||'')+' '+(rec.fileName||'')+' '+text}) || rec.type;
     rec.needsReview = !rec.distanceKm;
-    rec.ocrText = text.slice(0, 1200);
     await DB.put('records', rec);
     const i = state.records.findIndex(x=>x.id===rec.id); if(i>=0) state.records[i]=rec;
   }
@@ -1051,7 +1367,11 @@ function mergeImageGroup(group){
   const avgHr = pick('avgHr'), cadence = pick('cadence');
   if(distanceKm && durationSec && !avgPaceSec) avgPaceSec = durationSec/distanceKm;
   const iso = group.map(g=>g.iso).find(Boolean) || new Date().toISOString();
-  const splitsItem = group.find(g=>g.splits && g.splits.length>=2);
+  const splitsItem = group.filter(g=>g.splits && g.splits.length>=2)
+    .sort((a,b)=>{
+      const score = (sp)=> sp.reduce((s,x)=>s+(x.hr!=null?1:0)+(x.cad!=null?1:0),0);
+      return score(b.splits) - score(a.splits) || b.splits.length - a.splits.length;
+    })[0];
   const splits = splitsItem ? splitsItem.splits : null;
   const phasesItem = group.find(g=>g.phases && g.phases.length>=3);
   const phases = phasesItem ? phasesItem.phases : null;
@@ -1062,16 +1382,26 @@ function mergeImageGroup(group){
   const rec = { id:uid(), date:iso, source:'image', fileName:primary.fileName||'', notes:'',
     hasImage:true, distanceKm, durationSec, avgPaceSec, avgHr, cadence, splits, phases, autoType:true, mtime,
     hrMin, hrMax, cadMin, cadMax, paceFast, paceSlow,
-    calories: firstOf('calories'), gctMs: firstOf('gctMs'),
+    calories: firstOf('calories'), gctMs: firstOf('gctMs'), gctMaxMs: firstOf('gctMaxMs'),
     gctBalanceL: firstOf('gctBalanceL'), gctBalanceR: firstOf('gctBalanceR'),
+    flightMs: firstOf('flightMs'), flightMaxMs: firstOf('flightMaxMs'),
     strideCm: firstOf('strideCm'), strideMaxCm: firstOf('strideMaxCm'),
     vertOscCm: firstOf('vertOscCm'), vertRatioPct: firstOf('vertRatioPct'),
     teAerobic: firstOf('teAerobic'), teAnaerobic: firstOf('teAnaerobic'),
     bestPaceSec: firstOf('bestPaceSec'),
     hrZones: firstOf('hrZones'),
+    ascentM: firstOf('ascentM'), descentM: firstOf('descentM'),
+    elevMaxM: firstOf('elevMaxM'), elevMinM: firstOf('elevMinM'),
+    vo2max: firstOf('vo2max'), gradeDist: firstOf('gradeDist'),
     type: classifyRun({distanceKm, durationSec, avgPaceSec, avgHr, phases, hint:(primary.text||'')+' '+(primary.fileName||'')}),
     needsReview: !distanceKm, imageCount: group.length,
-    ocrText: group.map(g=>g.text||'').filter(Boolean).join('\n---\n').slice(0,2000) };
+    ocrText: group.map(g=>g.text||'').filter(Boolean).join('\n---\n').slice(0,8000) };
+  // 구간에서 심박/케이던스 보강
+  if(Array.isArray(splits) && splits.length>=2){
+    const tot = splitsTotals(splits);
+    if(rec.avgHr==null && tot.avgHr!=null) rec.avgHr = tot.avgHr;
+    if(rec.cadence==null && tot.cadence!=null) rec.cadence = tot.cadence;
+  }
   rec._images = [primary.dataUrl, ...group.filter(g=>g!==primary).map(g=>g.dataUrl)];
   return rec;
 }
@@ -1198,20 +1528,30 @@ async function attachImageToRecord(ex, item){
     if(item.p.avgHr!=null) ex.avgHr=item.p.avgHr;
     if(item.p.cadence!=null) ex.cadence=item.p.cadence;
     if(item.iso) ex.date=item.iso;
-    if(item.text) ex.ocrText=((ex.ocrText?ex.ocrText+'\n---\n':'')+(item.text||'')).slice(0,1500);
   } else {           // 스플릿이 합류 → 빈 값만 보완 + 구간 데이터 저장
-    if(item.splits && item.splits.length>=2 && !(ex.splits&&ex.splits.length>=2)) ex.splits=item.splits;
+    if(item.splits && item.splits.length>=2){
+      const better = !(ex.splits&&ex.splits.length>=2)
+        || item.splits.filter(s=>s.hr!=null||s.cad!=null).length > (ex.splits||[]).filter(s=>s.hr!=null||s.cad!=null).length;
+      if(better) ex.splits=item.splits;
+    }
     ['avgHr','cadence'].forEach(k=>{ if(ex[k]==null && item.p[k]!=null) ex[k]=item.p[k]; });
-    if(item.text) ex.ocrText=((ex.ocrText?ex.ocrText+'\n---\n':'')+(item.text||'')).slice(0,1500);
   }
+  // 요약 화면에 포함된 구간 표도 보존
+  if(!item.isSplit && item.splits && item.splits.length>=2){
+    const better = !(ex.splits&&ex.splits.length>=2)
+      || item.splits.filter(s=>s.hr!=null||s.cad!=null).length > (ex.splits||[]).filter(s=>s.hr!=null||s.cad!=null).length;
+    if(better) ex.splits=item.splits;
+  }
+  if(item.text) ex.ocrText=((ex.ocrText?ex.ocrText+'\n---\n':'')+(item.text||'')).slice(0,8000);
+  // 상세 지표: 요약 화면은 덮어쓰기, 스플릿은 빈 칸만 채움
+  if(!item.isSplit) assignDetailMetrics(ex, item.p||{});
+  else DETAIL_METRIC_KEYS.forEach(k=>{ if(ex[k]==null && item.p && item.p[k]!=null) ex[k]=item.p[k]; });
   // 인터벌/NSM 단계 데이터 보완 + 단계 있으면 타입 재판정
   if(item.phases && item.phases.length>=3 && !(ex.phases&&ex.phases.length>=3)){
     ex.phases = item.phases;
     if(ex.autoType!==false) ex.type = classifyRun({distanceKm:ex.distanceKm, durationSec:ex.durationSec,
       avgPaceSec:ex.avgPaceSec, avgHr:ex.avgHr, phases:ex.phases, hint:(ex.ocrText||'')}) || ex.type;
   }
-  // 범위(운동 세부사항) 값 보완
-  ['hrMin','hrMax','cadMin','cadMax','paceFast','paceSlow'].forEach(k=>{ if(ex[k]==null && item.p[k]!=null) ex[k]=item.p[k]; });
   if(ex.distanceKm && ex.durationSec && !ex.avgPaceSec) ex.avgPaceSec=ex.durationSec/ex.distanceKm;
   ex.imgKind='both'; ex.needsReview=!ex.distanceKm;
   await DB.put('records', ex);
@@ -1239,23 +1579,30 @@ async function buildImageItem(dataUrl, fileName, mtime, ocrReady){
   const phases = parseIntervalPhases(text||'');
   const isPhase = isPhaseWorkout(phases);
   const splits = isPhase ? [] : parseSplits(text||'');
-  // 스플릿 '전용' 화면 판별: 구간표 2행↑ + 총시간(h:mm:ss) 없음
+  // 스플릿 '전용': 구간표 2행↑ + h:mm:ss 없음 + 요약 신호 약함 (긴 Zepp 요약+구간은 요약으로)
   const hasHMS = /\d{1,2}:\d{2}:\d{2}/.test(text||'');
-  const isSplit = !isPhase && splits.length>=2 && !hasHMS;
+  const hasSummarySignal = (p.distanceKm!=null && p.distanceKm>1.6
+    && (p.durationSec!=null || p.avgPaceSec!=null || p.calories!=null || p.avgHr!=null || p.cadence!=null
+        || /심박|케이던스|칼로리|페이스|고도|경사|훈련\s*효과|보폭/i.test(text||'')));
+  const isSplit = !isPhase && splits.length>=2 && !hasHMS && !hasSummarySignal;
   if(isPhase){
     const tot = phasesTotals(phases);
     if(tot.distanceKm!=null) p.distanceKm = tot.distanceKm;
     if(tot.durationSec) p.durationSec = tot.durationSec;
     if(!p.avgPaceSec && tot.avgPaceSec) p.avgPaceSec = tot.avgPaceSec;
-  } else if(isSplit){
+  } else if(splits.length>=2){
     const tot = splitsTotals(splits);
-    p.distanceKm = tot.distanceKm; p.durationSec = tot.durationSec; p.avgPaceSec = tot.avgPaceSec;
-    if(p.avgHr==null) p.avgHr = tot.avgHr; if(p.cadence==null) p.cadence = tot.cadence;
+    if(p.distanceKm==null) p.distanceKm = tot.distanceKm;
+    if(p.durationSec==null) p.durationSec = tot.durationSec;
+    if(p.avgPaceSec==null) p.avgPaceSec = tot.avgPaceSec;
+    if(p.avgHr==null) p.avgHr = tot.avgHr;
+    if(p.cadence==null) p.cadence = tot.cadence;
   } else if(!hasHMS && /스\s*플\s*릿|킬로\s*미터|split/i.test(text||'') && p.distanceKm!=null && p.distanceKm<=1.6){
     p.distanceKm = null; // 파싱 실패한 스플릿 화면의 '1.00킬로미터' 라벨 오인 방지
   }
   return { dataUrl, fileName:fileName||'', text, p, iso:parseDateFromText(text||''),
-           splits: isSplit ? splits : null, phases: isPhase ? phases : null, isSplit, mtime: mtime||null };
+           splits: (!isPhase && splits.length>=2) ? splits : null,
+           phases: isPhase ? phases : null, isSplit, mtime: mtime||null };
 }
 
 async function handleFiles(files){
@@ -1521,27 +1868,67 @@ function openRecordReport(id){
   let intensity='';
   if(hrZone) intensity += kv('심박 강도', `<span class="riskbadge" style="background:${hrZone[1]}22;color:${hrZone[1]}">${hrZone[0]} · ${hrPct}%</span>`);
   if(paceZone) intensity += kv('페이스 존', `<b>${paceZone}</b> 페이스대`);
+  let hrZoneChart = '';
   if(r.hrZones){
     const zl = [['peak','최고 강도','#ff5d6c'],['high','고강도','#ff8a3d'],['mid','중강도','#ffb03d'],['focus','집중·저강도','#39d98a'],['warmup','워밍업','#4aa8ff']];
+    const zoneParts = [];
     zl.forEach(([k,n,c])=>{
-      const z=r.hrZones[k]; if(!z||z.sec==null) return;
-      intensity += kv(n, `<span style="color:${c}">${fmtDuration(z.sec)}</span>${z.pct!=null?` · ${z.pct}%`:''}`);
+      const z=r.hrZones[k]; if(!z||(z.sec==null&&z.pct==null)) return;
+      const val = z.sec!=null
+        ? `<span style="color:${c}">${fmtDuration(z.sec)}</span>${z.pct!=null?` · ${z.pct}%`:''}`
+        : `<span style="color:${c}">${z.pct}%</span>`;
+      intensity += kv(n, val);
+      zoneParts.push({ label:n, pct: z.pct!=null?z.pct:null, color:c, sec:z.sec });
     });
+    // % 없으면 시간 비율로 환산
+    if(zoneParts.length && zoneParts.every(p=>p.pct==null)){
+      const sum = zoneParts.reduce((s,p)=>s+(p.sec||0),0) || 1;
+      zoneParts.forEach(p=>{ p.pct = Math.round((p.sec||0)/sum*1000)/10; });
+    }
+    hrZoneChart = distStackHtml(zoneParts.map(p=>({label:p.label, pct:p.pct, color:p.color})));
   }
   if(!intensity) intensity = `<div class="note">최대심박(설정)과 페이스 존이 있으면 강도가 표시됩니다.</div>`;
 
   // 러닝 폼 / 효율
   let form='';
-  if(cad) form += kv('케이던스', `${cad} spm`);
-  if(r.gctMs) form += kv('지면 접촉 시간', `${r.gctMs} ms`);
+  if(cad) form += kv('케이던스', `${cad} spm${r.cadMax?` · 최고 ${r.cadMax}`:''}`);
+  if(r.cadMin!=null && r.cadMax!=null) form += rangeBarHtml(r.cadMin, cad, r.cadMax, '#39d98a', '');
+  else if(cad) form += rangeBarHtml(r.cadMin, cad, r.cadMax||null, '#39d98a', ' spm');
+  if(r.gctMs) form += kv('지면 접촉 시간', `${r.gctMs} ms${r.gctMaxMs?` · 최고 ${r.gctMaxMs}`:''}`);
   if(r.gctBalanceL!=null && r.gctBalanceR!=null) form += kv('접촉 밸런스', `L ${r.gctBalanceL}% / R ${r.gctBalanceR}%`);
-  if(r.strideCm) form += kv('보폭', `${r.strideCm} cm`);
+  if(r.flightMs) form += kv('비행 시간', `${r.flightMs} ms${r.flightMaxMs?` · 최고 ${r.flightMaxMs}`:''}`);
+  if(r.strideCm) form += kv('보폭', `${r.strideCm} cm${r.strideMaxCm?` · 최고 ${r.strideMaxCm}`:''}`);
   else if(stride) form += kv('추정 보폭', `${stride.toFixed(2)} m`);
+  if(r.strideCm && r.strideMaxCm) form += rangeBarHtml(Math.round(r.strideCm*0.92), r.strideCm, r.strideMaxCm, '#4aa8ff', ' cm');
   if(r.vertOscCm!=null) form += kv('수직 진폭', `${r.vertOscCm} cm`);
   if(r.vertRatioPct!=null) form += kv('수직 비', `${r.vertRatioPct}%`);
   if(r.teAerobic!=null || r.teAnaerobic!=null) form += kv('훈련 효과', `유산소 ${r.teAerobic??'-'} · 비유산소 ${r.teAnaerobic??'-'}`);
+  if(r.vo2max!=null) form += kv('VO2 Max', `${r.vo2max}`);
   if(beatsPerKm) form += kv('심박 효율', `${beatsPerKm} 회/km <span class="k" style="font-size:11px">(낮을수록 효율↑)</span>`);
   if(!form) form = `<div class="note">거리·시간·케이던스가 있으면 보폭/효율이 계산됩니다.</div>`;
+
+  // 고도 · 경사도 분포
+  let elevHtml = '';
+  if(r.ascentM!=null) elevHtml += kv('총 상승', `${r.ascentM} m`);
+  if(r.descentM!=null) elevHtml += kv('총 하강', `${r.descentM} m`);
+  if(r.elevMaxM!=null) elevHtml += kv('최고 고도', `${r.elevMaxM} m`);
+  if(r.elevMinM!=null) elevHtml += kv('최저 고도', `${r.elevMinM} m`);
+  let gradeChart = '';
+  if(r.gradeDist){
+    const gmap = [
+      ['steepUp','급경사 오르막','#ff5d6c'],
+      ['up','오르막','#ff8a3d'],
+      ['flat','평지','#39d98a'],
+      ['down','내리막','#4aa8ff'],
+      ['steepDown','급경사 내리막','#a78bfa']
+    ];
+    const parts = gmap.map(([k,n,c])=>{
+      const g=r.gradeDist[k]; if(!g||g.pct==null) return null;
+      return { label:n, pct:g.pct, color:c, extra: g.km!=null?`${g.km}km`:'' };
+    }).filter(Boolean);
+    gradeChart = distStackHtml(parts);
+    parts.forEach(p=>{ elevHtml += kv(p.label, `${p.pct}%${p.extra?` · ${p.extra}`:''}`); });
+  }
 
   // 예측
   let predHtml = pred
@@ -1569,6 +1956,8 @@ function openRecordReport(id){
   }
   if(stride && stride>1.4) fb.push('보폭이 다소 큽니다. 오버스트라이드는 무릎 부담을 키울 수 있어요.');
   if(paceCmp && paceCmp.diff<-10) fb.push('👍 같은 종류 평균보다 확연히 빠릅니다. 컨디션이 좋았네요.');
+  if((r.ascentM||0)+(r.descentM||0) >= 80) fb.push('⛰️ 고도 변화가 있는 코스입니다. 페이스·심박 기복은 지형 영향일 수 있어요.');
+  if(r.gradeDist && r.gradeDist.steepUp && r.gradeDist.steepUp.pct>=15) fb.push('⛰️ 급경사 오르막 비중이 큽니다. 케이던스를 유지하고 보폭을 줄이면 부담이 줄어요.');
 
   // 인터벌/NSM 단계 구성 (워밍업·러닝·회복·쿨다운)
   let phasesHtml = '';
@@ -1614,12 +2003,12 @@ function openRecordReport(id){
     const slowest = sp.reduce((a,b)=>b.pace>a.pace?b:a);
     const fi = sp.indexOf(fastest)+1, si = sp.indexOf(slowest)+1;
     const half = Math.floor(sp.length/2);
-    const wAvg = (arr,key)=>{ const T=arr.reduce((s,x)=>s+x.tSec,0); return T?Math.round(arr.reduce((s,x)=>s+x[key]*x.tSec,0)/T):0; };
+    const wAvg = (arr,key)=>{ const r=arr.filter(x=>x[key]!=null); const T=r.reduce((s,x)=>s+x.tSec,0); return T?Math.round(r.reduce((s,x)=>s+x[key]*x.tSec,0)/T):null; };
     const p1 = wAvg(sp.slice(0,half),'pace'), p2 = wAvg(sp.slice(half),'pace');
-    const neg = p2<p1, gap = Math.abs(p2-p1);
+    const neg = (p1!=null&&p2!=null) ? p2<p1 : false, gap = (p1!=null&&p2!=null) ? Math.abs(p2-p1) : 0;
     const third = Math.max(1, Math.floor(sp.length/3));
     const hrStart = wAvg(sp.slice(0,third),'hr'), hrEnd = wAvg(sp.slice(-third),'hr');
-    const drift = hrEnd-hrStart;
+    const drift = (hrStart!=null&&hrEnd!=null) ? hrEnd-hrStart : null;
     const maxP = Math.max(...sp.map(s=>s.pace)), minP = Math.min(...sp.map(s=>s.pace));
     const rowsHtml = sp.map((s,i)=>{
       const w = maxP===minP?100:Math.round((maxP-s.pace)/(maxP-minP)*92)+8; // 빠를수록 길게
@@ -1627,20 +2016,24 @@ function openRecordReport(id){
         <span style="width:16px;color:var(--sub)">${i+1}</span>
         <span style="width:52px;font-weight:700">${fmtPace(s.pace)}</span>
         <div style="flex:1;background:var(--line);border-radius:4px;height:7px;overflow:hidden"><i style="display:block;height:100%;width:${w}%;background:linear-gradient(90deg,var(--acc),var(--acc2))"></i></div>
-        <span style="width:40px;text-align:right;color:#ff5d6c">♥${s.hr}</span>
-        <span style="width:44px;text-align:right;color:var(--sub)">${s.cad}</span>
+        <span style="width:40px;text-align:right;color:#ff5d6c">♥${s.hr!=null?s.hr:'—'}</span>
+        <span style="width:44px;text-align:right;color:var(--sub)">${s.cad!=null?s.cad:'—'}</span>
       </div>`;
     }).join('');
+    const paceSpark = seriesSvg(sp.map(s=>s.pace), 'var(--acc)', { caption:'구간 페이스 (낮을수록 빠름)' });
+    const hrSpark = seriesSvg(sp.map(s=>s.hr), '#ff5d6c', { caption:'구간 심박' });
+    const cadSpark = seriesSvg(sp.map(s=>s.cad), '#39d98a', { caption:'구간 케이던스' });
     splitsHtml = kv('구간 수', `${sp.length}개`)
       + kv('최고 구간', `${fi}번째 · ${fmtPace(fastest.pace)}/km`)
       + kv('최저 구간', `${si}번째 · ${fmtPace(slowest.pace)}/km`)
       + kv('전·후반 페이스', `${fmtPace(p1)} → ${fmtPace(p2)} <b style="color:${neg?'var(--ok)':'var(--acc2)'}">(${neg?'네거티브':'포지티브'} ${gap}초)</b>`)
-      + kv('심박 드리프트', `${hrStart} → ${hrEnd} bpm <b style="color:${drift>8?'var(--acc2)':'var(--sub)'}">${drift>0?'+':''}${drift}</b>`)
+      + (drift!=null ? kv('심박 드리프트', `${hrStart} → ${hrEnd} bpm <b style="color:${drift>8?'var(--acc2)':'var(--sub)'}">${drift>0?'+':''}${drift}</b>`) : '')
+      + (paceSpark||hrSpark||cadSpark ? `<div class="spark-grid">${paceSpark}${hrSpark}${cadSpark}</div>` : '')
       + `<div class="sectitle" style="margin:12px 2px 6px">구간별 · 페이스 / ♥심박 / 케이던스</div>${rowsHtml}`;
     // 코칭
     if(neg && gap>=5) fb.push('📈 후반이 더 빠른 네거티브 스플릿입니다. 이상적인 페이스 운영이에요.');
     else if(!neg && gap>=20) fb.push('📉 후반에 페이스가 크게 떨어졌습니다. 초반을 조금 보수적으로 시작해 보세요.');
-    if(drift>=12) fb.push('🫀 후반 심박 드리프트가 큽니다(+'+drift+'bpm). 더위·탈수·초반 과속 가능성 — 수분 보충과 페이스 관리를 권장합니다.');
+    if(drift!=null && drift>=12) fb.push('🫀 후반 심박 드리프트가 큽니다(+'+drift+'bpm). 더위·탈수·초반 과속 가능성 — 수분 보충과 페이스 관리를 권장합니다.');
   }
 
   // 운동 세부사항(범위) 기반 상세 피드백
@@ -1679,8 +2072,9 @@ function openRecordReport(id){
     <div style="font-size:26px;font-weight:800;margin:6px 0 2px">${dist!=null?dist.toFixed(2)+' km':'—'} <span style="font-size:15px;color:var(--sub);font-weight:600">${pace?fmtPace(pace)+'/km':''}</span></div>
     ${r.hasImage?'<div id="rr_thumb" style="margin:8px 0"></div>':''}
     <div class="sectitle">기본 지표</div>${core}
-    <div class="hr"></div><div class="sectitle">강도 분석</div>${intensity}
+    <div class="hr"></div><div class="sectitle">강도 분석</div>${intensity}${hrZoneChart?`<div style="margin-top:10px">${hrZoneChart}</div>`:''}
     <div class="hr"></div><div class="sectitle">러닝 폼 · 효율</div>${form}
+    ${(elevHtml||gradeChart)?`<div class="hr"></div><div class="sectitle">고도 · 경사도 분포</div>${gradeChart||''}${elevHtml}`:''}
     ${detailHtml?`<div class="hr"></div><div class="sectitle">운동 세부 피드백 (심박·페이스·케이던스 범위)</div>${detailHtml}`:''}
     <div class="hr"></div><div class="sectitle">이 기록 기반 레이스 예측</div>${predHtml}
     <div class="hr"></div><div class="sectitle">평균 대비</div>${cmp}
@@ -3798,9 +4192,35 @@ async function boot(){
   }
 }
 
-/* 아이폰 홈화면 PWA: 포그라운드마다 SW 확인 → 새 버전이면 바로 새로고침 */
+/* 아이폰 홈화면 PWA: 원격 버전 확인 + SW 갱신 → 새 버전이면 자동 새로고침 */
+async function forceHardRefresh(){
+  try{
+    const regs = await navigator.serviceWorker.getRegistrations();
+    await Promise.all(regs.map(r=>r.unregister()));
+  }catch(e){}
+  try{
+    const keys = await caches.keys();
+    await Promise.all(keys.map(k=>caches.delete(k)));
+  }catch(e){}
+  const u = new URL(location.href);
+  u.searchParams.set('_rc', String(Date.now()));
+  location.replace(u.toString());
+}
+async function checkRemoteVersion(){
+  try{
+    const res = await fetch('./version.json?t='+Date.now(), { cache:'no-store' });
+    if(!res.ok) return;
+    const j = await res.json();
+    if(j && j.v && j.v !== APP_VERSION){
+      await forceHardRefresh();
+    }
+  }catch(e){}
+}
 function setupServiceWorker(){
-  if(!('serviceWorker' in navigator)) return;
+  if(!('serviceWorker' in navigator)){
+    checkRemoteVersion();
+    return;
+  }
   let reloading = false;
   const reloadOnce = ()=>{
     if(reloading) return;
@@ -3813,11 +4233,13 @@ function setupServiceWorker(){
   });
   (async ()=>{
     try{
+      await checkRemoteVersion();
       const reg = await navigator.serviceWorker.register('./sw.js?v='+APP_VERSION, { updateViaCache:'none' });
       const kick = ()=>{
         try{
           reg.update();
           if(reg.waiting) reg.waiting.postMessage({ type:'SKIP_WAITING' });
+          checkRemoteVersion();
         }catch(e){}
       };
       kick();
@@ -3830,9 +4252,13 @@ function setupServiceWorker(){
       document.addEventListener('visibilitychange', ()=>{ if(document.visibilityState==='visible') kick(); });
       window.addEventListener('pageshow', kick);
       window.addEventListener('focus', kick);
-      // 첫 진입 직후 한 번 더 (Safari가 늦게 감지하는 경우)
-      setTimeout(kick, 2500);
-    }catch(e){}
+      setTimeout(kick, 1500);
+      setTimeout(kick, 5000);
+      // 앱이 열려 있는 동안 주기적으로 새 버전 확인
+      setInterval(()=>{ if(document.visibilityState==='visible') kick(); }, 45000);
+    }catch(e){
+      checkRemoteVersion();
+    }
   })();
 }
 

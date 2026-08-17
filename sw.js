@@ -1,9 +1,10 @@
 // 런코치 서비스 워커 - 오프라인 캐시 (앱 셸)
-const CACHE = 'runcoach-v28';
+const CACHE = 'runcoach-v31';
 const ASSETS = [
   './',
   './index.html',
   './app.js',
+  './version.json',
   './manifest.json',
   './icon-192.png',
   './icon-512.png'
@@ -40,8 +41,8 @@ self.addEventListener('fetch', (e) => {
   const url = new URL(req.url);
   if (url.origin !== self.location.origin) return;
 
-  // sw.js 자체는 항상 네트워크 (캐시 우회)
-  if (url.pathname.endsWith('/sw.js')) {
+  // sw.js · version.json 은 항상 네트워크 (캐시 우회 → 자동 업데이트)
+  if (url.pathname.endsWith('/sw.js') || url.pathname.endsWith('/version.json')) {
     e.respondWith(fetch(req, { cache: 'no-store' }).catch(() => caches.match(req)));
     return;
   }
