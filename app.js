@@ -6,7 +6,7 @@
 'use strict';
 
 /* 앱 버전 (sw.js 캐시 버전과 동일하게 유지) */
-const APP_VERSION = 'v27';
+const APP_VERSION = 'v28';
 
 /* ---------- 세션 타입 정의 ---------- */
 const TYPES = {
@@ -3265,13 +3265,283 @@ function renderReport(){
     rows.push(['예상 하프', fmtDuration(m.racePred['half'])]);
     rows.push(['예상 풀', fmtDuration(m.racePred['full'])]);
   }
-  const advice=[];
-  if(a>1.5) advice.push('⚠️ 최근 훈련량이 급증했습니다. 이번 주는 회복 위주로 조정하세요.');
-  else if(a<0.8&&m.km28>0) advice.push('훈련량이 감소 추세입니다. 점진적으로 늘려도 좋습니다.');
-  else if(a) advice.push('✅ 부하가 안전 구간에 있습니다. 10% 룰로 점진적 증량하세요.');
-  if(m.zTot){ const hi=m.zoneDist.high/m.zTot; if(hi>0.25) advice.push('고강도 비중이 높습니다. 폴라라이즈드(저강도 80%)를 권장합니다.'); }
+  const brief = buildCoachBriefing(m);
+  const block = (title, items, cls)=>{
+    if(!items || !items.length) return '';
+    return `<div class="fb-block"><h4>${title}</h4>${items.map(it=>`
+      <div class="fb-item ${cls}"><b>${it.title}</b>
+        <span class="why">${it.body}</span>
+        ${it.next?`<span class="why" style="color:var(--txt)">→ ${it.next}</span>`:''}
+      </div>`).join('')}</div>`;
+  };
   box.innerHTML = rows.map(([k,v])=>`<div class="kv"><span class="k">${k}</span><span class="v">${v}</span></div>`).join('')
-    + (advice.length?`<div class="hr"></div>`+advice.map(t=>`<div class="note" style="font-size:12px;color:var(--txt)">${t}</div>`).join(''):'');
+    + `<div class="hr"></div>`
+    + (brief.summary?`<div class="fb-sum">${brief.summary}</div>`:'')
+    + block('잘하고 있는 점', brief.strengths, 'fb-good')
+    + block('아쉬운 점 · 리스크', brief.gaps, 'fb-gap')
+    + block('개선 포인트', brief.improves, 'fb-fix')
+    + block('앞으로의 훈련 방향', brief.direction, 'fb-dir')
+    + (brief.caveats.length?`<div class="note" style="margin-top:10px">${brief.caveats.join(' ')}</div>`:'');
+}
+
+/** 분석 탭용 코칭 브리핑 — 수치→결론이 아니라, 맥락·의미·다음 행동을 함께 제시 */
+function buildCoachBriefing(m){
+  const strengths=[], gaps=[], improves=[], direction=[], caveats=[];
+  const recs = state.records.filter(r=>r.distanceKm>0);
+  const n = m.count||0;
+  const a = m.acwr;
+  const days = getAvailableDays().length;
+  const lowPct = m.zTot? Math.round(m.zoneDist.low/m.zTot*100):null;
+  const midPct = m.zTot? Math.round(m.zoneDist.mid/m.zTot*100):null;
+  const hiPct  = m.zTot? Math.round(m.zoneDist.high/m.zTot*100):null;
+  const recent = recs.filter(r=>Date.now()-new Date(r.date)<21*86400000);
+  const withGct = recent.filter(r=>r.gctMs);
+  const withCad = recent.filter(r=>r.cadence);
+  const withHrZ = recent.filter(r=>r.hrZones && (r.hrZones.high||r.hrZones.peak||r.hrZones.mid));
+  const easyTrend = m.paceTrend||[];
+  const planStyle = state.settings.planStyle==='mixed'?'다양한 훈련(인터벌·템포)':'NSM(서브스레숄드)';
+
+  // ── 요약 내러티브 ──
+  let summary = '';
+  if(n < 4){
+    summary = `지금은 <b>기초 데이터 수집 단계</b>입니다. 기록이 ${n}회뿐이라 “체력이 올랐다/떨어졌다”고 단정하기보다, 앞으로 2~3주 동안 비슷한 조건의 이지런을 쌓아 기준선을 만드는 게 먼저입니다.`;
+    caveats.push('기록이 더 쌓이면 페이스·심박·케이던스 추세가 훨씬 신뢰도 있게 보입니다.');
+  } else {
+    const loadWord = !a? '부하를 아직 판단하기 어렵고'
+      : a>1.5? '최근 한 주 거리가 평소보다 꽤 빠르게 늘었고'
+      : a>1.3? '훈련량이 살짝 가파르게 오르는 중이고'
+      : a<0.8? '최근 한 주가 평소보다 가벼운 편이고'
+      : '부하 증가 속도는 무난한 편이고';
+    const mixWord = hiPct==null? ''
+      : hiPct>=28? `고강도 비중이 약 ${hiPct}%로 다소 높은 편입니다.`
+      : hiPct<=12 && midPct<=8? `저강도 위주(${lowPct??'-'}%)로 달리고 있어 회복 여력은 상대적으로 여유가 있습니다.`
+      : `강도 배분은 저 ${lowPct}% / 중 ${midPct}% / 고 ${hiPct}% 정도입니다.`;
+    summary = `${loadWord} ${mixWord} 아래에서는 “숫자 자체”보다 <b>그 숫자가 훈련에서 의미하는 바</b>와 <b>다음에 손볼 포인트</b>를 나눠 정리했습니다. 현재 플랜 스타일은 <b>${planStyle}</b>, 주 ${days}일 가능 기준입니다.`;
+  }
+
+  // ── 잘하고 있는 점 ──
+  if(a && a>=0.8 && a<=1.3 && m.km28>0){
+    strengths.push({
+      title:'부하가 급격히 튀지 않고 있습니다',
+      body:`ACWR ${a.toFixed(2)}는 “최근 7일 거리 ÷ 최근 4주 평균”입니다. 0.8~1.3 구간은 부상 위험과 디트레이닝 사이에서 비교적 안전한 증가 속도로 해석됩니다.`,
+      next:'이 리듬을 깨지 않으려면 주간 거리는 한 번에 크게 올리기보다, 이지 거리를 조금씩 늘리거나 가능 요일 안에서 세션 질을 올리는 쪽이 낫습니다.'
+    });
+  }
+  if(lowPct!=null && lowPct>=70){
+    strengths.push({
+      title:'저강도(이지·LSD·회복) 비중이 충분히 큽니다',
+      body:`전체 거리의 약 ${lowPct}%가 저강도입니다. 마라톤·장거리 기반은 ‘편하게 오래’ 달릴 수 있는 용량이 먼저이고, 고강도는 그 위에 얹는 양념에 가깝습니다.`,
+      next:'이지런에서 심박·숨이 편안한지 감각을 계속 체크하세요. 이지인데 대화가 어렵다면 페이스가 아니라 강도가 올라간 신호입니다.'
+    });
+  }
+  if(easyTrend.length>=4){
+    const first = easyTrend.slice(0, Math.ceil(easyTrend.length/2));
+    const last  = easyTrend.slice(Math.floor(easyTrend.length/2));
+    const avg = arr => arr.reduce((s,x)=>s+x.pace,0)/arr.length;
+    const d = Math.round(avg(first)-avg(last)); // >0 이면 최근이 더 빠름(초/km 감소)
+    if(d>=8){
+      strengths.push({
+        title:'이지런 페이스가 같은 노력 감각에서 빨라지는 흐름입니다',
+        body:`이지/LSD/회복 페이스 추세에서 최근 쪽이 이전보다 약 ${d}초/km 빠릅니다. 단순 “기록을 세게 달렸다”기보다, 유산소 효율이 좋아졌을 가능성을 시사합니다.`,
+        next:'이지를 더 세게 몰아붙이기보다, 지금의 편안한 강도를 유지한 채 거리를 조금씩 늘려 효율을 고착화하세요.'
+      });
+    } else if(d<=-12){
+      gaps.push({
+        title:'이지런이 최근 느려지거나 무거워진 느낌이 있습니다',
+        body:`이지 페이스 추세가 이전보다 약 ${Math.abs(d)}초/km 느립니다. 피로 누적, 더위, 수면, 또는 이지인데 심박이 높은 세션이 섞였을 수 있습니다.`,
+        next:'다음 1주는 거리를 유지하거나 살짝 줄이고, 이지의 ‘대화 가능한 숨’을 다시 기준점으로 잡으세요.'
+      });
+    }
+  }
+  if(m.effTrend!=null && m.effTrend>0){
+    strengths.push({
+      title:'같은 심박으로 더 효율적으로 나가는 신호가 있습니다',
+      body:`이지런 심박 대비 거리 효율이 이전보다 개선되는 쪽입니다. “더 세게”가 아니라 “같은 노력으로 조금 더 멀리/가볍게” 가는 방향이라 장거리 러너에게 좋은 신호입니다.`,
+      next:'고강도를 갑자기 늘리기보다, 이지·롱의 질(호흡·케이던스)을 유지하는 편이 이 이득을 지키기에 유리합니다.'
+    });
+  }
+  if(withCad.length>=3){
+    const avgCad = Math.round(withCad.reduce((s,r)=>s+r.cadence,0)/withCad.length);
+    if(avgCad>=170 && avgCad<=190){
+      strengths.push({
+        title:`케이던스 평균 ${avgCad} spm으로 안정적인 편입니다`,
+        body:'너무 낮은 케이던스(큰 보폭)는 착지 충격과 무릎 부담을 키우기 쉽고, 170 전후는 많은 러너에게 무난한 리듬입니다.',
+        next:'페이스가 올라갈 때도 보폭만 키우지 말고, 스텝을 살짝 빠르게 유지하는 감각을 연습해 보세요.'
+      });
+    }
+  }
+  if(withGct.length>=2){
+    const avgG = Math.round(withGct.reduce((s,r)=>s+r.gctMs,0)/withGct.length);
+    if(avgG>0 && avgG<=280){
+      strengths.push({
+        title:`지면 접촉 시간 평균 ${avgG} ms로 비교적 가벼운 편입니다`,
+        body:'접촉 시간이 짧을수록 “버티며 미는” 시간보다 “튕기듯 지나가는” 경향이 강합니다. 단, 절대값만으로 좋/나쁨을 단정하진 않습니다.',
+        next:'피로한 날 접촉 시간이 늘어나는지 한두 번만 더 비교해 보면, 컨디션 바로미터로 쓸 수 있습니다.'
+      });
+    } else if(avgG>=320){
+      gaps.push({
+        title:`지면 접촉이 평균 ${avgG} ms로 다소 깁니다`,
+        body:'긴 접촉은 피로·낮은 케이던스·힐 착지 과다와 함께 나타나는 경우가 많습니다. “잘못된 폼” 한 문장으로 몰아가기보다, 리듬과 피로를 같이 보라는 신호입니다.',
+        next:'케이던스를 3~5 spm만 올려 보거나, 짧은 스트라이드로 가볍게 구르는 이지 1회를 넣어 보세요.'
+      });
+    }
+  }
+  if(days>=3 && days<=5){
+    strengths.push({
+      title:`주 ${days}일 가능 일정은 지속 가능성 측면에서 현실적입니다`,
+      body:'매일 달리기보다, 회복일이 있는 주간이 장기적으로 더 잘 버티는 경우가 많습니다. 지금 설정은 “양보다 질+회복”을 하기 좋은 틀입니다.',
+      next:null
+    });
+  }
+
+  // ── 아쉬운 점 · 리스크 ──
+  if(a>1.5){
+    gaps.push({
+      title:'최근 한 주 거리가 평소 대비 급증했습니다',
+      body:`ACWR ${a.toFixed(2)}는 만성(4주) 대비 급성(1주) 부하가 높다는 뜻입니다. 부상·피로가 “쌓인 뒤”가 아니라 “쌓이는 중”에 신호가 옵니다.`,
+      next:'이번 주는 거리를 유지하거나 줄이고, 품질 세션이 있다면 반복 수·거리를 한 단계 낮추세요. 완전 휴식을 두려워할 필요는 없습니다.'
+    });
+  } else if(a>1.3){
+    gaps.push({
+      title:'부하 증가 속도가 경계선에 있습니다',
+      body:`ACWR ${a.toFixed(2)}는 “조심히 지켜볼 구간”입니다. 컨디션이 좋으면 버틸 수 있지만, 수면·통증이 겹치면 바로 위험 쪽으로 기울 수 있습니다.`,
+      next:'다음 증량은 거리보다 세션 완성도(이지 심박 안정, 품질 페이스 균일)에 두세요.'
+    });
+  } else if(a<0.8 && m.km28>0){
+    gaps.push({
+      title:'최근 훈련량이 평소보다 비어 있습니다',
+      body:`ACWR ${a.toFixed(2)}는 디트레이닝이라기보다 “쉬어 버린 한 주”에 가깝습니다. 문제는 공백 후 한꺼번에 따라잡으려 할 때입니다.`,
+      next:'복귀는 평소의 70~80% 거리에서 재개하고, 품질 세션은 1회만 먼저 넣는 게 안전합니다.'
+    });
+  }
+  if(hiPct!=null && hiPct>=28){
+    gaps.push({
+      title:`고강도 비중이 ${hiPct}%로 높은 편입니다`,
+      body:'고강도는 자극이 크지만 회복 비용도 큽니다. 저강도가 받쳐주지 않으면 “열심히 하는데 컨디션이 안 오르는” 패턴이 나오기 쉽습니다.',
+      next:'다음 1~2주는 인터벌/템포/NSM 중 하나만 남기고, 나머지 날은 진짜 이지로 숨통을 트세요.'
+    });
+  }
+  if(midPct!=null && midPct>=25 && hiPct!=null && hiPct>=15){
+    gaps.push({
+      title:'중강도(템포)와 고강도가 동시에 많은 “회색 지대” 훈련일 수 있습니다',
+      body:'템포와 인터벌을 자주 섞으면 둘 다 어중간해지기 쉽습니다. 폴라라이즈드는 “대부분은 쉽고, 일부만 확실히 세게”가 핵심입니다.',
+      next:'이번 주는 품질을 한 종류로 고정해 보세요. NSM 중심이면 템포를 줄이고, Mixed면 인터벌·템포 중 주 1개만 강하게.'
+    });
+  }
+  if(withHrZ.length>=2){
+    let peakShare=0, highShare=0, nZ=0;
+    withHrZ.forEach(r=>{
+      const z=r.hrZones; const tot=(z.peak?.sec||0)+(z.high?.sec||0)+(z.mid?.sec||0)+(z.focus?.sec||0)+(z.warmup?.sec||0);
+      if(tot>0){ peakShare+=(z.peak?.sec||0)/tot; highShare+=(z.high?.sec||0)/tot; nZ++; }
+    });
+    if(nZ){ peakShare/=nZ; highShare/=nZ; }
+    if(highShare+peakShare>=0.55){
+      gaps.push({
+        title:'심박 영역상 “고·최고 강도”에 오래 머무는 러닝이 있습니다',
+        body:`최근 심박영역이 있는 기록에서 고+최고 강도가 평균 ${(100*(highShare+peakShare)).toFixed(0)}% 수준입니다. 이지 목적 러닝까지 이 패턴이면 회복이 밀릴 수 있습니다.`,
+        next:'이지 날은 심박 상한(대략 최대심박의 70% 전후)을 넘기면 걸어도 됩니다. “페이스 자존심”보다 영역이 목표입니다.'
+      });
+    }
+  }
+  if(withCad.length>=3){
+    const avgCad = Math.round(withCad.reduce((s,r)=>s+r.cadence,0)/withCad.length);
+    if(avgCad>0 && avgCad<165){
+      gaps.push({
+        title:`케이던스가 평균 ${avgCad} spm으로 낮은 편입니다`,
+        body:'낮은 케이던스는 곧바로 “잘못”은 아니지만, 착지 충격·햄스트링 부담·후반 붕괴와 함께 관찰되는 경우가 많습니다.',
+        next:'1km만 메트로놈처럼 170 전후를 목표로 짧게 연습해 보세요. 전 거리 강요는 오히려 피로를 부릅니다.'
+      });
+    }
+  }
+  if(n>=5 && easyTrend.length<2){
+    gaps.push({
+      title:'이지런 데이터가 부족해 유산소 추세를 읽기 어렵습니다',
+      body:'품질 세션만 있으면 “세게 달린 날”의 페이스로 체력을 오해하기 쉽습니다. 이지가 기준선입니다.',
+      next:'주 1~2회는 의도적으로 느린 이지를 넣고, 심박·케이던스까지 남겨 주세요.'
+    });
+  }
+
+  // ── 개선 포인트 ──
+  improves.push({
+    title:'이지의 정의를 “느린 페이스”가 아니라 “낮은 강도”로 고정하기',
+    body:'같은 페이스라도 더위·피로·언덕에선 심박이 튀습니다. 이지 성공 여부는 기록이 아니라 호흡·심박 영역으로 판정하는 편이 안전합니다.',
+    next:'이지 날 목표: 대화 가능 + (가능하면) 저강도·워밍업 영역에 대부분의 시간.'
+  });
+  if(m.vdot){
+    improves.push({
+      title:`현재 추정 VDOT ${m.vdot} — 레이스 예측은 “오늘 목표”가 아닙니다`,
+      body:'VDOT·예상 기록은 최근 노력의 환산치입니다. 당장 그 페이스로 훈련하면 과해지기 쉽고, 특히 롱런을 레이스 페이스에 가깝게 몰면 회복이 무너집니다.',
+      next:'품질 세션만 존 페이스를 쓰고, 롱런은 이지~마라톤보다 여유 있게. 예측 기록은 동기부여용으로만.'
+    });
+  }
+  if(days<=2){
+    improves.push({
+      title:'주 2일 이하면 “한 번의 세션 완성도”가 핵심입니다',
+      body:'횟수가 적으면 자극이 부족해 조급해지기 쉽지만, 한 번에 몰아치면 부상 위험이 큽니다.',
+      next:'1회는 품질(짧게 확실히), 1회는 롱 또는 긴 이지로 역할을 나누세요. 둘 다 세게 가지 않기.'
+    });
+  } else if(days>=5){
+    improves.push({
+      title:'가능 요일이 많으니 “쉬는 날의 질”도 설계하세요',
+      body:'매일 비슷한 강도로 달리면 중강도에 고착됩니다. 가능일이 많아도 전부 훈련일이 될 필요는 없습니다.',
+      next:'주 1일은 완전 휴식 또는 아주 짧은 리커버리로 비워, 품질 날의 자극이 흡수되게 하세요.'
+    });
+  }
+  const gctBal = recent.find(r=>r.gctBalanceL!=null && r.gctBalanceR!=null);
+  if(gctBal){
+    const diff = Math.abs(gctBal.gctBalanceL-gctBal.gctBalanceR);
+    if(diff>=4){
+      improves.push({
+        title:`좌우 지면접촉 밸런스 차이가 약 ${diff.toFixed(1)}%p 있습니다`,
+        body:'일시적 측정 오차일 수도 있고, 골반·발목·신발 마모 비대칭 신호일 수도 있습니다. 한 번의 수치로 교정 운동을 단정하진 마세요.',
+        next:'2~3번 더 같은 코스에서 비교하고, 차이가 계속되면 폼 영상이나 전문가 상담을 고려하세요.'
+      });
+    }
+  }
+
+  // ── 훈련 방향 ──
+  if(a>1.4){
+    direction.push({
+      title:'이번 주 키워드: 흡수(회복) 주간',
+      body:'자극을 더 넣기보다, 이미 넣은 자극을 몸이 받아들이게 하는 주입니다.',
+      next:`${planStyle} 기준이라도 품질은 최대 1회, 나머지는 이지·휴식. 거리는 최근 4주 평균 이하를 목표.`
+    });
+  } else if(hiPct!=null && hiPct>=25){
+    direction.push({
+      title:'이번 주 키워드: 폴라라이즈드 재정렬',
+      body:'고강도 비중을 낮추고 이지의 “쉬움”을 되찾는 쪽이, 장기적으로 고강도 세션의 질도 올려 줍니다.',
+      next:'품질 1회만 남기고, 이지 날은 페이스 목표를 과감히 버리세요.'
+    });
+  } else if(a<0.85 && m.km28>0){
+    direction.push({
+      title:'이번 주 키워드: 부드러운 재가동',
+      body:'공백 후 따라잡기는 실패 패턴입니다. 몸은 최근에 한 일에 적응합니다.',
+      next:'평소 주간의 70~80% 거리 + 품질 0~1회. 다음 주에야 평소 볼륨으로.'
+    });
+  } else {
+    direction.push({
+      title:'이번 주 키워드: 점진적 과부하(작게)',
+      body:'부하가 안정적이면 이제 “조금만” 올리면 됩니다. 크게 올리면 다시 ACWR이 튀고, 작게 올리면 적응이 쌓입니다.',
+      next: days<=3
+        ? '주 3일 전후: 품질 1 + 이지 1 + 롱/긴이지 1. 거리 증량은 이지·롱에만.'
+        : '주 4일+: 품질 1~2 + 이지/회복 + 롱. 주간 거리는 지난주 대비 10% 안쪽.'
+    });
+  }
+  direction.push({
+    title:'다음 기록에 남기면 코칭이 더 정확해집니다',
+    body:'거리·시간만이 아니라 심박영역·케이던스·지면접촉이 있으면 “세게 달렸는지 / 편하게 달렸는지 / 폼이 무거웠는지”를 구분할 수 있습니다.',
+    next:'Zepp 내보내기(GPX/TCX/FIT) 또는 「운동 기록 불러오기」로 상세 지표를 계속 쌓아 주세요.'
+  });
+
+  if(!strengths.length){
+    strengths.push({
+      title:'기록을 남기고 있다는 것 자체가 출발점입니다',
+      body:'감으로만 달리면 과훈련·과회복을 구분하기 어렵습니다. 데이터가 쌓일수록 “오늘의 한 방”보다 “몇 주의 결”을 보게 됩니다.',
+      next:null
+    });
+  }
+
+  return { summary, strengths, gaps, improves, direction, caveats };
 }
 async function renderStorage(){
   const box=$('#storageBox'); let html='';
