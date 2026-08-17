@@ -261,6 +261,11 @@ canvas.chart{width:100%;height:150px;display:block}
           <button class="btn sm block" id="btnStyleMixed">다양한 훈련 (인터벌·템포·LSD)</button>
         </div>
       </div>
+      <div style="margin-top:12px">
+        <label class="f" style="margin-bottom:6px">운동 가능 요일 <span id="planDaysHint" style="color:var(--acc);font-weight:700"></span></label>
+        <div class="chipwrap" id="planDayChips"></div>
+        <div class="note" style="margin-top:6px">체크한 요일 수(예: 화·토·일=3일)에 맞춰 강도·집중도를 나눠 스케줄을 만듭니다.</div>
+      </div>
     </div>
     <div id="planList"></div>
     <div class="card tight">
@@ -284,15 +289,16 @@ canvas.chart{width:100%;height:150px;display:block}
     </div>
     <div class="card">
       <h2>러닝 기록 첨부 & 학습</h2>
-      <div class="desc">Amazfit Active 3(Zepp) <b>GPX · TCX · FIT</b>, 스크린샷, txt 또는 직접 입력으로 기록을 추가하면 체력·플랜에 반영합니다.</div>
+      <div class="desc">Zepp <b>GPX · TCX · FIT</b> 또는 긴 스크린샷에서 심박영역·지면접촉 등 상세 지표까지 읽어 플랜에 반영합니다.</div>
       <div class="grid2">
         <label class="btn" for="fileInput" id="btnAddFile" style="cursor:pointer;margin:0">📎 파일 첨부</label>
         <button class="btn" id="btnAddManual" type="button">✏️ 직접 입력</button>
       </div>
-      <!-- accept 비움: iOS가 .fit/.tcx UTI를 몰라 목록에서 회색 처리하는 문제 방지. JS에서 형식 판별 -->
       <input type="file" id="fileInput" multiple class="file-hidden" />
+      <label class="btn primary block" for="imgImportInput" id="btnImportWorkout" style="margin-top:10px;cursor:pointer">📥 운동 기록 불러오기</label>
+      <input type="file" id="imgImportInput" accept="image/*" multiple class="file-hidden" />
       <button class="btn block" id="btnOcrAll" type="button" style="margin-top:10px">🔍 첨부 이미지에서 수치 자동 인식</button>
-      <div class="note"><b>워치 기록:</b> Zepp에서보낸 GPX/TCX/FIT를 <b>파일 앱 → 나의 iPhone → 러닝</b> 등에서 고르면 됩니다. 거리·시간·페이스·심박·케이던스를 자동으로 읽습니다. 아이폰에서는 ‘모든 파일’이 보이도록 필터를 열어 두었습니다.</div>
+      <div class="note"><b>운동 기록 불러오기:</b> Zepp 긴 스크린샷(심박영역·지면접촉·보폭 등)을 올리면 OCR로 상세 수치를 채웁니다. <b>파일 첨부</b>는 GPX/TCX/FIT 워치 내보내기용입니다.</div>
     </div>
     <div style="display:flex;justify-content:space-between;align-items:center;margin:4px 2px 10px">
       <div class="sectitle" style="margin:0">기록 목록 <span id="recCount" style="color:var(--acc)"></span></div>

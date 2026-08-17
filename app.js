@@ -6,7 +6,7 @@
 'use strict';
 
 /* 앱 버전 (sw.js 캐시 버전과 동일하게 유지) */
-const APP_VERSION = 'v26';
+const APP_VERSION = 'v27';
 
 /* ---------- 세션 타입 정의 ---------- */
 const TYPES = {
@@ -160,8 +160,9 @@ const state = {
   settings: {
     weeklyGoalKm: 40,
     targetRace: 'full',      // full/half/10k/5k
-    longRunDay: 0,           // 0=일요일
-    restDays: [1],           // 월요일
+    longRunDay: 0,           // 0=일요일 (레거시)
+    restDays: [1],           // 월요일 (레거시)
+    availableDays: [0,1,2,3,4,5,6], // 운동 가능 요일(월=0 … 일=6)
     weightKg: 65,
     maxHR: 190,              // 최대심박 (이지런 심박 상한 계산용)
     raceDate: '',            // 목표 대회일 (YYYY-MM-DD, 선택)
@@ -340,6 +341,11 @@ function classifyRun({distanceKm, avgPaceSec, avgHr, durationSec, hint, phases})
 }
 
 /* 자유 텍스트/OCR 결과에서 수치 추출 (애플 피트니스·Strava·Garmin·Zepp 형식 대응) */
+function parseDurToken(str){
+  const m = String(str||'').match(/(\d{1,2})\s*:\s*(\d{2})/);
+  if(!m) return null;
+  return (+m[1])*60 + (+m[2]);
+}
 function parseTextMetrics(text){
   const out = {};
   const t = (text||'').replace(/\u00A0/g,' ').replace(/[Ⅰl|]/g,'1'); // 흔한 OCR 혼동 보정(약하게)
@@ -361,18 +367,70 @@ function parseTextMetrics(text){
   m = t.match(/(\d{1,2})\s*['’‘`´′:]\s*(\d{2})\s*["”“''′″]?\s*\/?\s*k\s*m/i)
     || t.match(/페이스\D{0,6}(\d{1,2})\D(\d{2})/);
   if(m){ const s=(+m[1])*60+(+m[2]); if(s>=120&&s<=1200) out.avgPaceSec=s; }
-  // 심박: 첫 bpm (요약값이 스플릿보다 위에 위치)
-  m = t.match(/(\d{2,3})\s*bpm/i) || t.match(/(?:심박|hr)\D{0,5}(\d{2,3})/i);
+  // 최고 페이스
+  m = t.match(/(?:최고|베스트|best)\s*페이스\D{0,8}(\d{1,2})\s*['’‘`´′:]\s*(\d{2})/i);
+  if(m){ const s=(+m[1])*60+(+m[2]); if(s>=120&&s<=1200) out.bestPaceSec=s; }
+  // 심박: 평균 / 최고
+  m = t.match(/평균\s*심박\D{0,8}(\d{2,3})/i) || t.match(/(\d{2,3})\s*bpm/i) || t.match(/(?:심박|hr)\D{0,5}(\d{2,3})/i);
   if(m){ const v=+m[1]; if(v>=60&&v<=230) out.avgHr=v; }
-  // 케이던스: 첫 spm
-  m = t.match(/(\d{2,3})\s*spm/i) || t.match(/(?:케이던스|cadence)\D{0,5}(\d{2,3})/i);
+  m = t.match(/최고\s*심박\D{0,8}(\d{2,3})/i) || t.match(/max(?:imum)?\s*h(?:eart)?\s*r(?:ate)?\D{0,8}(\d{2,3})/i);
+  if(m){ const v=+m[1]; if(v>=60&&v<=230) out.hrMax=v; }
+  // 케이던스: 평균 / 최고
+  m = t.match(/평균\s*케이던스\D{0,8}(\d{2,3})/i) || t.match(/(\d{2,3})\s*spm/i) || t.match(/(?:케이던스|cadence)\D{0,5}(\d{2,3})/i);
   if(m){ const v=+m[1]; if(v>=120&&v<=260) out.cadence=v; }
+  m = t.match(/최고\s*케이던스\D{0,8}(\d{2,3})/i);
+  if(m){ const v=+m[1]; if(v>=120&&v<=260) out.cadMax=v; }
+  // 칼로리
+  m = t.match(/(\d{2,4})\s*k\s*cal/i);
+  if(m) out.calories = +m[1];
+  // 지면 접촉 시간 (ms)
+  m = t.match(/지면\s*접촉\s*시간\D{0,24}(\d{2,4})\s*m\s*s/i)
+    || t.match(/(?:ground\s*contact|GCT|stance\s*time)\D{0,16}(\d{2,4})\s*m\s*s/i);
+  if(m){ const v=+m[1]; if(v>=150&&v<=500) out.gctMs=v; }
+  m = t.match(/지면\s*접촉\s*시간\s*밸런스\D{0,20}(\d{1,2}(?:[.,]\d+)?)\s*%?\s*[\/L좌]?\D{0,8}(\d{1,2}(?:[.,]\d+)?)\s*%/i);
+  if(m){ out.gctBalanceL=parseFloat(m[1].replace(',','.')); out.gctBalanceR=parseFloat(m[2].replace(',','.')); }
+  // 보폭 (cm → m 저장은 cm로 통일)
+  m = t.match(/보폭\D{0,20}(\d{2,3})\s*cm/i) || t.match(/stride\D{0,12}(\d{2,3})\s*cm/i);
+  if(m){ const v=+m[1]; if(v>=40&&v<=200) out.strideCm=v; }
+  m = t.match(/최고\s*보폭\D{0,12}(\d{2,3})\s*cm/i);
+  if(m){ const v=+m[1]; if(v>=40&&v<=200) out.strideMaxCm=v; }
+  // 수직 진폭 / 수직 비
+  m = t.match(/수직\s*진폭\D{0,16}(\d{1,2}(?:[.,]\d+)?)\s*cm/i);
+  if(m) out.vertOscCm = parseFloat(m[1].replace(',','.'));
+  m = t.match(/수직\s*비\D{0,16}(\d{1,2}(?:[.,]\d+)?)\s*%/i);
+  if(m) out.vertRatioPct = parseFloat(m[1].replace(',','.'));
+  // 훈련 효과
+  m = t.match(/유산소\D{0,12}(\d{1,2}(?:[.,]\d+)?)/);
+  if(m){ const v=parseFloat(m[1].replace(',','.')); if(v>=0&&v<=5.5) out.teAerobic=v; }
+  m = t.match(/비\s*유산소\D{0,12}(\d{1,2}(?:[.,]\d+)?)|anaerobic\D{0,12}(\d{1,2}(?:[.,]\d+)?)/i);
+  if(m){ const v=parseFloat((m[1]||m[2]).replace(',','.')); if(v>=0&&v<=5.5) out.teAnaerobic=v; }
+  // 심박 영역(Zepp): 최고/고/중/저(집중)·워밍업 — 시간·비율
+  const hrZones = {};
+  const zoneRules = [
+    ['peak',   /최고\s*강도|peak/i],
+    ['high',   /고\s*강도(?!\s*훈련\s*효과)|anaerobic|intensive/i],
+    ['mid',    /중\s*강도|aerobic(?!\s*effect)|moderate/i],
+    ['focus',  /저\s*강도|집중\s*훈련|fat\s*burn|지방\s*연소/i],
+    ['warmup', /워\s*밍\s*업|warm\s*-?\s*up/i]
+  ];
+  for(const [key, re] of zoneRules){
+    const rm = t.match(new RegExp(re.source + '[^\\d%]{0,40}(\\d{1,2}\\s*:\\s*\\d{2})[^\\d%]{0,12}(\\d{1,3})\\s*%','i'));
+    if(rm){
+      const sec = parseDurToken(rm[1]);
+      const pct = +rm[2];
+      if(sec!=null) hrZones[key] = { sec, pct: (pct>=0&&pct<=100)?pct:null };
+    } else {
+      const rm2 = t.match(new RegExp(re.source + '[^\\d%]{0,40}(\\d{1,2}\\s*:\\s*\\d{2})','i'));
+      if(rm2){ const sec=parseDurToken(rm2[1]); if(sec!=null) hrZones[key]={ sec, pct:null }; }
+    }
+  }
+  if(Object.keys(hrZones).length) out.hrZones = hrZones;
   // 범위(운동 세부사항 화면): 심박/케이던스/페이스 min~max
   let r;
   r = t.match(/(\d{2,3})\s*[~〜―–—\-]\s*(\d{2,3})\s*b\s*p\s*m/i);
-  if(r){ const a=+r[1],b=+r[2]; if(a>=50&&b<=230){ out.hrMin=Math.min(a,b); out.hrMax=Math.max(a,b); } }
+  if(r){ const a=+r[1],b=+r[2]; if(a>=50&&b<=230){ out.hrMin=Math.min(a,b); if(out.hrMax==null) out.hrMax=Math.max(a,b); } }
   r = t.match(/(\d{2,3})\s*[~〜―–—\-]\s*(\d{2,3})\s*s\s*p\s*m/i);
-  if(r){ const a=+r[1],b=+r[2]; if(a>=100&&b<=260){ out.cadMin=Math.min(a,b); out.cadMax=Math.max(a,b); } }
+  if(r){ const a=+r[1],b=+r[2]; if(a>=100&&b<=260){ out.cadMin=Math.min(a,b); if(out.cadMax==null) out.cadMax=Math.max(a,b); } }
   r = t.match(/(\d{1,2})\s*['’‘`´′:]\s*(\d{2})\s*["”“''′″]?\s*[~〜―–—\-]\s*(\d{1,2})\s*['’‘`´′:]\s*(\d{2})/);
   if(r){ const p1=(+r[1])*60+(+r[2]), p2=(+r[3])*60+(+r[4]);
     if(p1>=120&&p1<=1200&&p2>=120&&p2<=1200){ out.paceSlow=Math.max(p1,p2); out.paceFast=Math.min(p1,p2); } }
@@ -380,6 +438,20 @@ function parseTextMetrics(text){
   if(out.distanceKm && out.durationSec && !out.avgPaceSec) out.avgPaceSec = out.durationSec / out.distanceKm;
   if(out.distanceKm && out.avgPaceSec && !out.durationSec) out.durationSec = Math.round(out.avgPaceSec * out.distanceKm);
   return out;
+}
+
+const DETAIL_METRIC_KEYS = [
+  'distanceKm','durationSec','avgPaceSec','bestPaceSec','avgHr','hrMin','hrMax',
+  'cadence','cadMin','cadMax','calories','gctMs','gctBalanceL','gctBalanceR',
+  'strideCm','strideMaxCm','vertOscCm','vertRatioPct','teAerobic','teAnaerobic',
+  'hrZones','paceFast','paceSlow'
+];
+function assignDetailMetrics(target, src){
+  let changed = false;
+  DETAIL_METRIC_KEYS.forEach(k=>{
+    if(src[k]!=null){ target[k] = src[k]; changed = true; }
+  });
+  return changed;
 }
 
 /* 스플릿(구간) 표 파싱: "1 04:50 4'50"/KM 155BPM 175SPM" 행들을 추출 */
@@ -545,16 +617,13 @@ async function applyOcrToRecord(rec){
   if(!f || !f.dataUrl) return false;
   const text = await ocrImage(f.dataUrl);
   const p = parseTextMetrics(text);
-  let changed = false;
-  ['distanceKm','durationSec','avgPaceSec','avgHr','cadence','hrMin','hrMax','cadMin','cadMax','paceFast','paceSlow'].forEach(k=>{
-    if(p[k]!=null){ rec[k] = p[k]; changed = true; }
-  });
+  let changed = assignDetailMetrics(rec, p);
   const iso = parseDateFromText(text);
   if(iso){ rec.date = iso; changed = true; }
   if(changed){
     rec.type = classifyRun({distanceKm:rec.distanceKm, durationSec:rec.durationSec, avgPaceSec:rec.avgPaceSec, avgHr:rec.avgHr, hint:(rec.notes||'')+' '+(rec.fileName||'')+' '+text}) || rec.type;
     rec.needsReview = !rec.distanceKm;
-    rec.ocrText = text.slice(0, 400);
+    rec.ocrText = text.slice(0, 1200);
     await DB.put('records', rec);
     const i = state.records.findIndex(x=>x.id===rec.id); if(i>=0) state.records[i]=rec;
   }
@@ -694,12 +763,15 @@ function parseTCX(xmlText){
     || '';
   const km = dist/1000;
   if(!(km>0.01) && !(dur>0)) return null;
+  let calories = null;
+  xmlLocalAll(doc, 'Calories').forEach(c=>{ const v=+c.textContent; if(v>0) calories=(calories||0)+v; });
   return {
     distanceKm: km>0 ? +km.toFixed(2) : null,
     durationSec: dur>0 ? Math.round(dur) : null,
     avgPaceSec: (dur>0 && km>0) ? dur/km : null,
     avgHr: hrN ? Math.round(hrSum/hrN) : null,
     cadence,
+    calories: calories>0 ? Math.round(calories) : null,
     date: t0 || new Date().toISOString()
   };
 }
@@ -816,7 +888,7 @@ function parseFIT(buf){
     }
 
     // Session 우선, 없으면 Lap/Record 합산
-    let distM=null, durSec=null, avgHr=null, cadence=null, startMs=null, sport=null;
+    let distM=null, durSec=null, avgHr=null, cadence=null, startMs=null, sport=null, calories=null, gctMs=null;
     const applySession = (s)=>{
       if(!s) return;
       if(s[5]!=null) sport = s[5];
@@ -833,6 +905,8 @@ function parseFIT(buf){
         cadence = s[17];
         if(sport===1 || sport===11 || cadence < 90) cadence = Math.round(cadence * 2);
       }
+      if(s[11]!=null) calories = s[11]; // total_calories
+      if(s[89]!=null) gctMs = Math.round(s[89]/10); // avg_stance_time scale 10
     };
     applySession(session);
     if((distM==null || !(distM>0)) && laps.length){
@@ -886,6 +960,8 @@ function parseFIT(buf){
       avgPaceSec: (durSec>0 && km>0) ? durSec/km : null,
       avgHr: avgHr>0 ? avgHr : null,
       cadence: cadence>0 ? cadence : null,
+      calories: calories>0 ? Math.round(calories) : null,
+      gctMs: gctMs>0 ? gctMs : null,
       date: startMs ? new Date(startMs).toISOString() : new Date().toISOString()
     };
   }catch(e){ return null; }
@@ -986,9 +1062,16 @@ function mergeImageGroup(group){
   const rec = { id:uid(), date:iso, source:'image', fileName:primary.fileName||'', notes:'',
     hasImage:true, distanceKm, durationSec, avgPaceSec, avgHr, cadence, splits, phases, autoType:true, mtime,
     hrMin, hrMax, cadMin, cadMax, paceFast, paceSlow,
+    calories: firstOf('calories'), gctMs: firstOf('gctMs'),
+    gctBalanceL: firstOf('gctBalanceL'), gctBalanceR: firstOf('gctBalanceR'),
+    strideCm: firstOf('strideCm'), strideMaxCm: firstOf('strideMaxCm'),
+    vertOscCm: firstOf('vertOscCm'), vertRatioPct: firstOf('vertRatioPct'),
+    teAerobic: firstOf('teAerobic'), teAnaerobic: firstOf('teAnaerobic'),
+    bestPaceSec: firstOf('bestPaceSec'),
+    hrZones: firstOf('hrZones'),
     type: classifyRun({distanceKm, durationSec, avgPaceSec, avgHr, phases, hint:(primary.text||'')+' '+(primary.fileName||'')}),
     needsReview: !distanceKm, imageCount: group.length,
-    ocrText: group.map(g=>g.text||'').filter(Boolean).join('\n---\n').slice(0,1500) };
+    ocrText: group.map(g=>g.text||'').filter(Boolean).join('\n---\n').slice(0,2000) };
   rec._images = [primary.dataUrl, ...group.filter(g=>g!==primary).map(g=>g.dataUrl)];
   return rec;
 }
@@ -1256,6 +1339,8 @@ function editRecord(id){
   const r = id ? state.records.find(x=>x.id===id) : { id:uid(), date:new Date().toISOString(), source:'manual', type:'easy' };
   const opts = Object.values(TYPES).filter(t=>t.key!=='rest')
     .map(t=>`<option value="${t.key}" ${r.type===t.key?'selected':''}>${t.label}</option>`).join('');
+  const z = r.hrZones || {};
+  const zSec = (k)=> z[k] && z[k].sec!=null ? fmtDuration(z[k].sec) : '';
   openSheet(`
     <h3>${id?'기록 편집':'러닝 기록 입력'}</h3>
     <label class="f">날짜</label>
@@ -1268,7 +1353,32 @@ function editRecord(id){
     </div>
     <div class="inline">
       <div><label class="f">평균 심박</label><input type="number" id="e_hr" value="${r.avgHr??''}" placeholder="150"></div>
+      <div><label class="f">최고 심박</label><input type="number" id="e_hrmax" value="${r.hrMax??''}" placeholder="180"></div>
+    </div>
+    <div class="inline">
       <div><label class="f">케이던스</label><input type="number" id="e_cad" value="${r.cadence??''}" placeholder="180"></div>
+      <div><label class="f">칼로리</label><input type="number" id="e_cal" value="${r.calories??''}" placeholder="500"></div>
+    </div>
+    <div class="inline">
+      <div><label class="f">지면 접촉 (ms)</label><input type="number" id="e_gct" value="${r.gctMs??''}" placeholder="280"></div>
+      <div><label class="f">보폭 (cm)</label><input type="number" id="e_stride" value="${r.strideCm??''}" placeholder="120"></div>
+    </div>
+    <div class="inline">
+      <div><label class="f">수직 진폭 (cm)</label><input type="number" step="0.1" id="e_vo" value="${r.vertOscCm??''}" placeholder="7.5"></div>
+      <div><label class="f">수직 비 (%)</label><input type="number" step="0.1" id="e_vr" value="${r.vertRatioPct??''}" placeholder="10"></div>
+    </div>
+    <label class="f" style="margin-top:12px">심박 영역 시간 (분:초)</label>
+    <div class="inline">
+      <div><label class="f">최고 강도</label><input id="e_z_peak" value="${zSec('peak')}" placeholder="7:16"></div>
+      <div><label class="f">고강도</label><input id="e_z_high" value="${zSec('high')}" placeholder="34:04"></div>
+    </div>
+    <div class="inline">
+      <div><label class="f">중강도</label><input id="e_z_mid" value="${zSec('mid')}" placeholder="10:28"></div>
+      <div><label class="f">집중·저강도</label><input id="e_z_focus" value="${zSec('focus')}" placeholder="4:51"></div>
+    </div>
+    <div class="inline">
+      <div><label class="f">워밍업</label><input id="e_z_warmup" value="${zSec('warmup')}" placeholder="0:00"></div>
+      <div><label class="f">유산소 TE</label><input type="number" step="0.1" id="e_tea" value="${r.teAerobic??''}" placeholder="3.5"></div>
     </div>
     <label class="f">메모</label>
     <textarea id="e_notes" placeholder="느낌, 코스, 날씨 등">${r.notes||''}</textarea>
@@ -1283,18 +1393,13 @@ function editRecord(id){
     try{
       const changed = await applyOcrToRecord(r);
       if(changed){
-        $('#e_date').value = isoDay(r.date);
-        $('#e_dist').value = r.distanceKm ?? '';
-        $('#e_dur').value  = r.durationSec ? (r.durationSec/60).toFixed(1) : '';
-        $('#e_hr').value   = r.avgHr ?? '';
-        $('#e_cad').value  = r.cadence ?? '';
-        if(r.type) $('#e_type').value = r.type;
-        toast('인식 완료 · 날짜/수치 확인 후 저장');
+        closeSheet(); editRecord(r.id);
+        toast('인식 완료 · 상세 수치 확인 후 저장');
+        return;
       } else toast('수치를 찾지 못했어요');
     }catch(e){ toast('인식 실패'); }
     b.textContent='🔍 이미지에서 수치 다시 인식'; b.disabled=false;
   }; }
-  // 수치 입력 시 종류 자동 분류 (사용자가 종류를 직접 선택하면 중단)
   let typeTouched = false;
   const typeSel = $('#e_type');
   if(typeSel) typeSel.addEventListener('change', ()=> typeTouched=true);
@@ -1315,6 +1420,14 @@ function editRecord(id){
     const dist = parseFloat($('#e_dist').value)||null;
     const durMin = parseFloat($('#e_dur').value)||null;
     const durSec = durMin?durMin*60:null;
+    const parseZ = (id)=>{
+      const el = $('#'+id); if(!el||!el.value.trim()) return null;
+      const sec = parseDurToken(el.value.trim());
+      return sec!=null ? { sec, pct:null } : null;
+    };
+    const hrZones = {};
+    const zm = { peak:'e_z_peak', high:'e_z_high', mid:'e_z_mid', focus:'e_z_focus', warmup:'e_z_warmup' };
+    Object.keys(zm).forEach(k=>{ const v=parseZ(zm[k]); if(v) hrZones[k]=v; });
     const rec = { ...r,
       date: new Date($('#e_date').value).toISOString(),
       type: $('#e_type').value,
@@ -1322,7 +1435,15 @@ function editRecord(id){
       durationSec: durSec,
       avgPaceSec: (dist&&durSec)? durSec/dist : (r.avgPaceSec||null),
       avgHr: parseInt($('#e_hr').value)||null,
+      hrMax: parseInt($('#e_hrmax').value)||null,
       cadence: parseInt($('#e_cad').value)||null,
+      calories: parseInt($('#e_cal').value)||null,
+      gctMs: parseInt($('#e_gct').value)||null,
+      strideCm: parseInt($('#e_stride').value)||null,
+      vertOscCm: parseFloat($('#e_vo').value)||null,
+      vertRatioPct: parseFloat($('#e_vr').value)||null,
+      teAerobic: parseFloat($('#e_tea').value)||null,
+      hrZones: Object.keys(hrZones).length ? hrZones : (r.hrZones||null),
       notes: $('#e_notes').value.trim(),
       needsReview: false,
       autoType: false
@@ -1392,19 +1513,33 @@ function openRecordReport(id){
     + kv('평균 페이스', pace?`${fmtPace(pace)}/km`:'-')
     + kv('평균 속도', speedKmh?`${speedKmh.toFixed(1)} km/h`:'-')
     + kv('평균 심박', hr?`♥ ${hr} bpm`:'-')
+    + (r.hrMax? kv('최고 심박', `♥ ${r.hrMax} bpm`) : '')
     + kv('케이던스', cad?`${cad} spm`:'-')
-    + kv('추정 소모', kcal?`${kcal} kcal <span class="k" style="font-size:11px">(${wt}kg 기준)</span>`:'-');
+    + kv('추정 소모', (r.calories||kcal)?`${r.calories||kcal} kcal <span class="k" style="font-size:11px">${r.calories?'':`(${wt}kg 기준)`}</span>`:'-');
 
   // 강도 분석
   let intensity='';
   if(hrZone) intensity += kv('심박 강도', `<span class="riskbadge" style="background:${hrZone[1]}22;color:${hrZone[1]}">${hrZone[0]} · ${hrPct}%</span>`);
   if(paceZone) intensity += kv('페이스 존', `<b>${paceZone}</b> 페이스대`);
+  if(r.hrZones){
+    const zl = [['peak','최고 강도','#ff5d6c'],['high','고강도','#ff8a3d'],['mid','중강도','#ffb03d'],['focus','집중·저강도','#39d98a'],['warmup','워밍업','#4aa8ff']];
+    zl.forEach(([k,n,c])=>{
+      const z=r.hrZones[k]; if(!z||z.sec==null) return;
+      intensity += kv(n, `<span style="color:${c}">${fmtDuration(z.sec)}</span>${z.pct!=null?` · ${z.pct}%`:''}`);
+    });
+  }
   if(!intensity) intensity = `<div class="note">최대심박(설정)과 페이스 존이 있으면 강도가 표시됩니다.</div>`;
 
   // 러닝 폼 / 효율
   let form='';
   if(cad) form += kv('케이던스', `${cad} spm`);
-  if(stride) form += kv('추정 보폭', `${stride.toFixed(2)} m`);
+  if(r.gctMs) form += kv('지면 접촉 시간', `${r.gctMs} ms`);
+  if(r.gctBalanceL!=null && r.gctBalanceR!=null) form += kv('접촉 밸런스', `L ${r.gctBalanceL}% / R ${r.gctBalanceR}%`);
+  if(r.strideCm) form += kv('보폭', `${r.strideCm} cm`);
+  else if(stride) form += kv('추정 보폭', `${stride.toFixed(2)} m`);
+  if(r.vertOscCm!=null) form += kv('수직 진폭', `${r.vertOscCm} cm`);
+  if(r.vertRatioPct!=null) form += kv('수직 비', `${r.vertRatioPct}%`);
+  if(r.teAerobic!=null || r.teAnaerobic!=null) form += kv('훈련 효과', `유산소 ${r.teAerobic??'-'} · 비유산소 ${r.teAnaerobic??'-'}`);
   if(beatsPerKm) form += kv('심박 효율', `${beatsPerKm} 회/km <span class="k" style="font-size:11px">(낮을수록 효율↑)</span>`);
   if(!form) form = `<div class="note">거리·시간·케이던스가 있으면 보폭/효율이 계산됩니다.</div>`;
 
@@ -2137,6 +2272,79 @@ function buildNsmWorkout(r, easyPace, recPace){
   return { name:`NSM ${r.min}분 ×${r.reps}`, steps };
 }
 
+/* 운동 가능 요일(월=0…일=6) — 선택 일수에 맞춰 세션 재배치 */
+function getAvailableDays(){
+  const d = state.settings.availableDays;
+  if(Array.isArray(d) && d.length) return [...new Set(d.map(Number).filter(x=>x>=0&&x<=6))].sort((a,b)=>a-b);
+  return [0,1,2,3,4,5,6];
+}
+function restSession(reason){
+  return { type:'rest', km:0, title:'휴식', detail: reason || '완전 휴식 또는 스트레칭/코어', done:false };
+}
+function sessionPriority(s){
+  if(!s || s.type==='rest') return 9;
+  if(s.type==='lsd' || s.mp) return 0;
+  if(s.type==='nsm' || s.type==='interval' || s.type==='tempo') return 1;
+  if(s.type==='easy') return 2;
+  if(s.type==='recovery') return 3;
+  return 4;
+}
+/** 선택 요일 수에 맞게 품질·롱런·이지를 세분화해 배치 */
+function applyAvailableDays(sessions){
+  const allow = getAvailableDays();
+  if(allow.length >= 7) return sessions;
+  const Srest = ()=> restSession('운동 가능일이 아님 · 완전 휴식');
+  if(!allow.length) return Array.from({length:7}, Srest);
+
+  const pool = sessions.filter(s=>s && s.type!=='rest').sort((a,b)=>sessionPriority(a)-sessionPriority(b));
+  const maxKeep = allow.length;
+  let long = pool.filter(s=>s.type==='lsd'||s.mp);
+  let quality = pool.filter(s=>['nsm','interval','tempo'].includes(s.type));
+  let easy = pool.filter(s=>s.type==='easy'||s.type==='recovery');
+
+  if(allow.length <= 2){
+    quality = quality.slice(0, 1); long = long.slice(0, 1); easy = [];
+  } else if(allow.length === 3){
+    quality = quality.slice(0, 1); long = long.slice(0, 1); easy = easy.slice(0, 1);
+  } else if(allow.length === 4){
+    quality = quality.slice(0, Math.min(2, quality.length));
+    long = long.slice(0, 1);
+    easy = easy.slice(0, Math.max(0, allow.length - quality.length - long.length));
+  } else {
+    quality = quality.slice(0, Math.min(2, quality.length));
+    long = long.slice(0, 1);
+    easy = easy.slice(0, Math.max(0, allow.length - quality.length - long.length));
+  }
+
+  const picked = [...long, ...quality, ...easy].slice(0, maxKeep);
+  const weekend = allow.filter(d=>d===5||d===6);
+  const weekday = allow.filter(d=>d<5);
+  const out = Array.from({length:7}, (_,i)=> allow.includes(i) ? null : Srest());
+  const used = new Set();
+  const place = (day, sess)=>{
+    if(day==null || sess==null || out[day]) return false;
+    out[day] = { ...sess }; used.add(sess); return true;
+  };
+
+  const longS = picked.find(s=>s.type==='lsd'||s.mp);
+  if(longS){
+    const day = weekend.includes(6) ? 6 : (weekend.includes(5) ? 5 : allow[allow.length-1]);
+    place(day, longS);
+  }
+  const prefQ = [1,3,2,4,0].filter(d=>allow.includes(d));
+  const quals = picked.filter(s=>['nsm','interval','tempo'].includes(s.type) && !used.has(s));
+  let qi = 0;
+  for(const d of prefQ){ if(qi>=quals.length) break; if(!out[d]) place(d, quals[qi++]); }
+  for(const d of allow){ if(qi>=quals.length) break; if(!out[d]) place(d, quals[qi++]); }
+  const easies = picked.filter(s=>(s.type==='easy'||s.type==='recovery') && !used.has(s));
+  let ei = 0;
+  for(const d of allow){ if(ei>=easies.length) break; if(!out[d]) place(d, easies[ei++]); }
+  for(const d of allow){
+    if(!out[d]) out[d] = { type:'easy', km:5, title:'이지런 5km', detail:'가능일에 맞춘 유지 러닝 · 편하게', done:false };
+  }
+  return out;
+}
+
 /* 다양한 훈련(폴라라이즈드) 플랜: 인터벌·템포·LSD·이지·리커버리 */
 function generateMixedPlan(monday){
   const m = state.metrics;
@@ -2179,7 +2387,7 @@ function generateMixedPlan(monday){
   const perEasy = easyIdx.length? remain/easyIdx.length : 0;
 
   const mpWeek = phase==='mp';
-  const sessions = skel.map((t,i)=>{
+  const sessions = applyAvailableDays(skel.map((t,i)=>{
     if(mpWeek && i===6){ const mpText=mpBlockText(m.tenKSec||270);
       return S('lsd', longKm, `MP 롱런 ${longKm}km`, `${paceText('lsd')} 베이스 + ${mpText} · 보급 연습`, {mp:true}); }
     if(t==='interval'){ const km=estWorkoutKm(ivWo);
@@ -2190,15 +2398,16 @@ function generateMixedPlan(monday){
     if(t==='rest'){ return S('rest', 0, '휴식', '완전 휴식 또는 스트레칭/코어'); }
     if(t==='recovery'){ const km=Math.max(3,Math.round(perEasy*0.7)); return S('recovery', km, `회복 조깅 ${km}km`, `${paceText('recovery')}${hrTxt('recovery')} · 아주 편하게`); }
     const km=Math.max(4,Math.round(perEasy)); return S('easy', km, `이지런 ${km}km`, `${paceText('easy')}${hrTxt('easy')} · 심박 상한 우선`);
-  });
+  }));
 
   const totalKm = Math.round(sessions.reduce((s,x)=>s+(x.km||0),0));
   const phaseLbl = { base:'기본기', mp:'마라톤 특이', taper:'테이퍼' }[phase] || '기본기';
   const dLbl = isDownWeek ? ' · 회복주' : '';
   const qCnt = sessions.filter(s=>s.workout).length;
+  const dayN = getAvailableDays().length;
   const plan = { weekStart: isoDay(monday), target:totalKm, sessions, createdAt:Date.now(),
-                 vdot:m.vdot, phase, isDownWeek, style:'mixed',
-                 note:`다양한 훈련 · ${phaseLbl}${dLbl} · 주 ${totalKm}km · 품질 ${qCnt}회(인터벌·템포)` };
+                 vdot:m.vdot, phase, isDownWeek, style:'mixed', availableDays:getAvailableDays(),
+                 note:`다양한 훈련 · ${phaseLbl}${dLbl} · 주 ${dayN}일 · ${totalKm}km · 품질 ${qCnt}회` };
   state.plans[plan.weekStart] = plan;
   DB.put('plans', plan);
   return plan;
@@ -2236,7 +2445,9 @@ function generatePlan(monday){
   let hours = m.weeklyHours>0 ? m.weeklyHours : (target*(m.pace5k?m.pace5k+95:360))/3600;
   const level = m.count < 8 ? 'intro' : 'base';
   // 마라톤 특이/테이퍼 주엔 NSM 세션 축소 (문서: MP 롱런 주엔 NSM 줄이기)
-  const maxSess = phase==='mp' ? 2 : phase==='taper' ? 1 : 3;
+  const maxSessByDays = {1:1,2:1,3:1,4:2,5:2,6:2,7:3};
+  const dayCap = maxSessByDays[getAvailableDays().length] ?? 3;
+  const maxSess = Math.min(dayCap, phase==='mp' ? 2 : phase==='taper' ? 1 : 3);
   const rx = NSM.prescribe(tenK, isDownWeek? hours*0.8 : hours, level, maxSess);
 
   const easyPace = (m.zones?.easy) || 360, recPace = (m.zones?.recovery) || 400;
@@ -2273,7 +2484,7 @@ function generatePlan(monday){
   const mpWeek = phase==='mp';
 
   let nsmPick = 0;
-  const sessions = skeleton.map((t,i)=>{
+  const sessions = applyAvailableDays(skeleton.map((t,i)=>{
     if(mpWeek && i===5){ // 토요일 MP 롱런
       const mpText = mpBlockText(tenK);
       return S('lsd', longKm, `MP 롱런 ${longKm}km`, `${paceText('lsd')} 베이스 + ${mpText} · 보급 연습 병행`, {mp:true});
@@ -2284,15 +2495,17 @@ function generatePlan(monday){
     if(t==='rest'){ return S('rest', 0, '휴식', '완전 휴식 또는 스트레칭/코어 (회복도 훈련)'); }
     if(t==='recovery'){ const km=Math.max(3,Math.round(perEasy*0.7)); return S('recovery', km, `회복 조깅 ${km}km`, `${paceText('recovery')}${hrTxt('recovery')} · 아주 편하게, 다리 풀기`); }
     const km=Math.max(4,Math.round(perEasy)); return S('easy', km, `이지런 ${km}km`, `${paceText('easy')}${hrTxt('easy')} · 심박 상한 우선(느려도 OK)`);
-  });
+  }));
 
   const totalKm = Math.round(sessions.reduce((s,x)=>s+(x.km||0),0));
   const ratio = Math.round(subTtotal / (hours*60) * 100) || 0;
   const phaseLbl = { base:'기본기', mp:'마라톤 특이', taper:'테이퍼' }[phase] || '기본기';
   const dLbl = isDownWeek ? ' · 회복주' : '';
+  const dayN = getAvailableDays().length;
   const plan = { weekStart: isoDay(monday), target:totalKm, sessions, createdAt:Date.now(),
                  vdot:m.vdot, subTtotal, ratio, nsmCount:nsmSessions.length, phase, isDownWeek,
-                 note:`${phaseLbl}${dLbl} · 주 ${totalKm}km · NSM ${nsmSessions.length}회 · 서브T ${subTtotal}분(≈${ratio}%)` };
+                 availableDays:getAvailableDays(),
+                 note:`${phaseLbl}${dLbl} · 주 ${dayN}일 · ${totalKm}km · NSM ${Math.min(nsmSessions.length, sessions.filter(s=>s.type==='nsm').length)}회 · 서브T ${subTtotal}분(≈${ratio}%)` };
   state.plans[plan.weekStart] = plan;
   DB.put('plans', plan);
   return plan;
@@ -2301,6 +2514,7 @@ function generatePlan(monday){
 function renderPlan(){
   const m = state.metrics;
   renderStyleToggle();
+  renderPlanDayChips();
   const monday = new Date(mondayOf(Date.now()));
   monday.setDate(monday.getDate()+state.planWeekOffset*7);
   let plan = getPlan(monday);
@@ -2444,6 +2658,30 @@ function renderStyleToggle(){
   const nsm = state.settings.planStyle!=='mixed';
   const a=$('#btnStyleNsm'), b=$('#btnStyleMixed'); if(!a||!b) return;
   a.classList.toggle('primary', nsm); b.classList.toggle('primary', !nsm);
+}
+function renderPlanDayChips(){
+  const box = $('#planDayChips'); if(!box) return;
+  const labels = ['월','화','수','목','금','토','일'];
+  const cur = new Set(getAvailableDays());
+  box.innerHTML = labels.map((lb,i)=>
+    `<label class="vchk"><input type="checkbox" data-day="${i}" ${cur.has(i)?'checked':''}> ${lb}</label>`
+  ).join('');
+  const hint = $('#planDaysHint');
+  if(hint) hint.textContent = `· ${cur.size}일 일정`;
+  $$('input[data-day]', box).forEach(inp=>{
+    inp.onchange = ()=>{
+      const days = $$('input[data-day]', box).filter(x=>x.checked).map(x=>+x.dataset.day);
+      if(!days.length){ inp.checked = true; toast('최소 1일은 선택하세요'); return; }
+      state.settings.availableDays = days;
+      localStorage.setItem('rc_settings', JSON.stringify(state.settings));
+      if(hint) hint.textContent = `· ${days.length}일 일정`;
+      if(state.metrics && state.metrics.count){
+        const monday = new Date(mondayOf(Date.now())); monday.setDate(monday.getDate()+state.planWeekOffset*7);
+        generatePlan(monday); renderPlan();
+        toast(`${days.length}일 일정으로 플랜을 갱신했어요`);
+      }
+    };
+  });
 }
 function setPlanStyle(style){
   state.settings.planStyle = style;
@@ -3089,6 +3327,8 @@ if(_btnAdd && _btnAdd.tagName==='BUTTON') _btnAdd.onclick = ()=>$('#fileInput').
 $('#btnAddManual').onclick = ()=>editRecord(null);
 $('#btnOcrAll').onclick = ()=>ocrAllImages();
 $('#fileInput').onchange = (e)=>{ if(e.target.files && e.target.files.length) handleFiles(e.target.files); e.target.value=''; };
+const imgImp = $('#imgImportInput');
+if(imgImp) imgImp.onchange = (e)=>{ if(e.target.files && e.target.files.length) handleFiles(e.target.files); e.target.value=''; };
 $('#recFilter').onchange = renderRecords;
 
 /* ============================================================
@@ -3122,6 +3362,9 @@ $('#btnSettings').onclick = ()=>{
       <option value="nsm" ${s.planStyle!=='mixed'?'selected':''}>NSM 중심 (서브스레숄드)</option>
       <option value="mixed" ${s.planStyle==='mixed'?'selected':''}>다양한 훈련 (인터벌·템포·LSD)</option>
     </select>
+    <label class="f" style="margin-top:12px">운동 가능 요일</label>
+    <div class="chipwrap" id="setDayChips"></div>
+    <div class="note" style="margin:4px 0 0">선택한 요일 수에 맞춰 플랜 강도가 세분화됩니다 (예: 3일=품질+이지+롱).</div>
 
     <div class="hr"></div>
     <h3 style="margin:0 0 8px">🔊 러닝 음성 안내</h3>
@@ -3168,6 +3411,16 @@ $('#btnSettings').onclick = ()=>{
   `);
   $('#set_shoes').onclick=()=>{ closeSheet(); go('shoes'); };
 
+  // 가능 요일 체크
+  {
+    const box = $('#setDayChips');
+    const labels = ['월','화','수','목','금','토','일'];
+    const cur = new Set(getAvailableDays());
+    if(box) box.innerHTML = labels.map((lb,i)=>
+      `<label class="vchk"><input type="checkbox" data-set-day="${i}" ${cur.has(i)?'checked':''}> ${lb}</label>`
+    ).join('');
+  }
+
   // 음성 목록 채우기 (기기별) — 한국어 우선
   const fillVoices = ()=>{
     const sel = $('#v_voice'); if(!sel) return;
@@ -3213,7 +3466,13 @@ $('#btnSettings').onclick = ()=>{
     state.settings.maxHR=enteredMax;
     state.settings.raceDate=$('#set_race_date').value||'';
     const prevStyle = state.settings.planStyle;
+    const prevDays = JSON.stringify(getAvailableDays());
     state.settings.planStyle = $('#set_style').value;
+    const dayBox = $('#setDayChips');
+    if(dayBox){
+      const days = $$('input[data-set-day]', dayBox).filter(x=>x.checked).map(x=>+x.dataset.setDay);
+      state.settings.availableDays = days.length ? days : [0,1,2,3,4,5,6];
+    }
     state.settings.voice = {
       enabled: $('#v_enabled').checked,
       pace: $('#v_pace').checked, lapPace: $('#v_lap').checked, cadence: $('#v_cad').checked,
@@ -3224,8 +3483,8 @@ $('#btnSettings').onclick = ()=>{
       pitch: parseFloat($('#v_pitch').value)||1.1
     };
     localStorage.setItem('rc_settings',JSON.stringify(state.settings));
-    // 스타일이 바뀌었으면 이번 주 플랜 재생성
-    if(prevStyle!==state.settings.planStyle && state.metrics.count){
+    // 스타일·가능요일이 바뀌었으면 이번 주 플랜 재생성
+    if((prevStyle!==state.settings.planStyle || prevDays!==JSON.stringify(getAvailableDays())) && state.metrics.count){
       const monday = new Date(mondayOf(Date.now())); monday.setDate(monday.getDate()+state.planWeekOffset*7);
       generatePlan(monday);
     }
@@ -3252,6 +3511,9 @@ async function boot(){
     if(s) state.settings=Object.assign(state.settings,JSON.parse(s));
     state.settings.voice = Object.assign(defVoice, state.settings.voice||{});   // 새 음성 옵션 기본값 보장
     if(!state.settings.planStyle) state.settings.planStyle='nsm';
+    if(!Array.isArray(state.settings.availableDays) || !state.settings.availableDays.length){
+      state.settings.availableDays = [0,1,2,3,4,5,6];
+    }
   }catch(e){}
   await loadAll();
   await reclassifyAllAuto(); recompute();   // 기존 기록도 최신 존 기준으로 재판정

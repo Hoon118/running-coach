@@ -21,7 +21,7 @@ GitHub Pages로 배포합니다. (빌드 도구·Node 불필요)
 - **배포**: GitHub `main`에 push → GitHub Pages 자동 배포
   - 저장소: https://github.com/Hoon118/running-coach.git
   - 라이브: https://hoon-run-coach.netlify.app/ (또는 GitHub Pages 주소)
-- **현재 버전**: v26 (`app.js`의 `APP_VERSION`과 `sw.js`의 `CACHE`가 항상 일치해야 함)
+- **현재 버전**: v27 (`app.js`의 `APP_VERSION`과 `sw.js`의 `CACHE`가 항상 일치해야 함)
 
 ---
 
