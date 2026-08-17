@@ -6,7 +6,7 @@
 'use strict';
 
 /* 앱 버전 (sw.js 캐시 버전과 동일하게 유지) */
-const APP_VERSION = 'v37';
+const APP_VERSION = 'v38';
 
 /* ---------- 세션 타입 정의 ---------- */
 const TYPES = {
@@ -223,6 +223,121 @@ function mondayOf(date){
   return d;
 }
 function isoDay(d){ return new Date(d).toISOString().slice(0,10); }
+function localDay(d){
+  const dt = d instanceof Date ? d : new Date(d||Date.now());
+  if(isNaN(dt.getTime())) return localDay(new Date());
+  return `${dt.getFullYear()}-${String(dt.getMonth()+1).padStart(2,'0')}-${String(dt.getDate()).padStart(2,'0')}`;
+}
+function dateFromLocalDay(ymd){
+  const p = String(ymd||'').split('-').map(Number);
+  if(p.length<3 || !p[0] || !p[1] || !p[2]) return dateFromLocalDay(localDay(new Date()));
+  return new Date(p[0], p[1]-1, p[2], 12, 0, 0).toISOString();
+}
+function calendarMonthHTML(selectedYmd, viewYmd){
+  const sel = selectedYmd || localDay(new Date());
+  const [vy, vm] = (viewYmd || sel).split('-').map(Number);
+  const first = new Date(vy, vm-1, 1);
+  const pad = first.getDay();
+  const dim = new Date(vy, vm, 0).getDate();
+  const today = localDay(new Date());
+  const dows = ['일','월','화','수','목','금','토'].map(d=>`<div class="cal-dow">${d}</div>`).join('');
+  let cells = '';
+  for(let i=0;i<pad;i++) cells += `<button type="button" class="cal-day mut" disabled></button>`;
+  for(let d=1;d<=dim;d++){
+    const ymd = `${vy}-${String(vm).padStart(2,'0')}-${String(d).padStart(2,'0')}`;
+    const cls = ['cal-day'];
+    if(ymd===sel) cls.push('sel');
+    if(ymd===today) cls.push('today');
+    cells += `<button type="button" class="${cls.join(' ')}" data-ymd="${ymd}">${d}</button>`;
+  }
+  return `<div class="cal" data-view="${vy}-${String(vm).padStart(2,'0')}">
+    <div class="cal-head">
+      <button type="button" class="btn sm cal-nav" data-delta="-1">‹</button>
+      <div class="cal-title">${vy}년 ${vm}월</div>
+      <button type="button" class="btn sm cal-nav" data-delta="1">›</button>
+    </div>
+    <div class="cal-grid">${dows}${cells}</div>
+  </div>`;
+}
+function bindMonthCalendar(host, selectedYmd, onPick){
+  let sel = selectedYmd || localDay(new Date());
+  let view = sel;
+  const paint = ()=>{
+    host.innerHTML = calendarMonthHTML(sel, view);
+    host.querySelectorAll('.cal-nav').forEach(btn=>{
+      btn.onclick = (e)=>{
+        e.preventDefault();
+        const [y,m] = view.split('-').map(Number);
+        view = localDay(new Date(y, m-1+(+btn.dataset.delta), 1));
+        paint();
+      };
+    });
+    host.querySelectorAll('.cal-day[data-ymd]').forEach(btn=>{
+      btn.onclick = ()=>{
+        sel = btn.dataset.ymd;
+        view = sel;
+        paint();
+        if(onPick) onPick(sel);
+      };
+    });
+  };
+  paint();
+  return {
+    get: ()=> sel,
+    set: (ymd)=>{ sel = ymd; view = ymd; paint(); if(onPick) onPick(sel); }
+  };
+}
+function recDateLabel(r){
+  const bits = [
+    r.distanceKm!=null ? `${Number(r.distanceKm).toFixed(2)}km` : null,
+    r.avgPaceSec ? `${fmtPace(r.avgPaceSec)}/km` : null
+  ].filter(Boolean);
+  return bits.join(' · ') || '새 기록';
+}
+function openDateConfirmSheet(ids){
+  const recs = (ids||[]).map(id=> state.records.find(r=>r.id===id)).filter(Boolean);
+  if(!recs.length) return;
+  const days = recs.map(r=> r.dateNeedsConfirm ? localDay(new Date()) : localDay(r.date));
+  let focus = 0;
+  openSheet(`
+    <h3>러닝 일자</h3>
+    <p class="note">이미지에서 읽은 날짜는 쓰지 않습니다. 실제로 달린 날을 달력에서 눌러 주세요.</p>
+    <div class="cal-picked" id="dc_lbl"></div>
+    <div id="dc_cal"></div>
+    <div id="dc_list"></div>
+    <button class="btn primary block" id="dc_ok" style="margin-top:12px">이 날짜로 저장</button>
+  `);
+  const paintList = ()=>{
+    const box = $('#dc_list');
+    if(!box) return;
+    if(recs.length===1){ box.innerHTML = `<div class="note">${recDateLabel(recs[0])}</div>`; return; }
+    box.innerHTML = recs.map((r,i)=>`<button type="button" class="dc-row ${i===focus?'on':''}" data-i="${i}">
+      <span>${recDateLabel(r)}</span><b>${fmtDate(dateFromLocalDay(days[i]))}</b>
+    </button>`).join('');
+    $$('.dc-row', box).forEach(el=> el.onclick = ()=>{
+      focus = +el.dataset.i;
+      cal.set(days[focus]);
+      paintList();
+    });
+  };
+  const cal = bindMonthCalendar($('#dc_cal'), days[0], (ymd)=>{
+    days[focus] = ymd;
+    $('#dc_lbl').textContent = fmtDate(dateFromLocalDay(ymd));
+    paintList();
+  });
+  $('#dc_lbl').textContent = fmtDate(dateFromLocalDay(cal.get()));
+  paintList();
+  $('#dc_ok').onclick = async ()=>{
+    for(let i=0;i<recs.length;i++){
+      recs[i].date = dateFromLocalDay(days[i]);
+      recs[i].dateNeedsConfirm = false;
+      await DB.put('records', recs[i]);
+    }
+    state.records.sort((a,b)=> new Date(b.date)-new Date(a.date));
+    recompute(); renderRecords(); closeSheet();
+    toast(recs.length===1 ? `일자 저장 · ${fmtDate(recs[0].date)}` : `일자 저장 · ${recs.length}개`);
+  };
+}
 
 /* ---------- 토스트 / 모달 ---------- */
 let toastTimer;
@@ -1574,8 +1689,6 @@ async function applyOcrToRecord(rec){
     const sum = Object.values(rec.hrZones).reduce((s,z)=>s+(z.sec||0),0);
     if(sum > rec.durationSec*1.2){ rec.hrZones=null; changed=true; }
   }
-  const iso = parseDateFromText(text) || parseDateFromFileName(rec.fileName);
-  if(iso){ rec.date = iso; changed = true; }
   const phases = parseIntervalPhases(text);
   if(isPhaseWorkout(phases)){
     rec.phases = phases; changed = true;
@@ -1617,7 +1730,7 @@ async function ocrAllImages(){
     state.records.sort((a,b)=>new Date(b.date)-new Date(a.date));
     recompute(); renderRecords();
   }
-  toast(ok? `인식 완료 · ${ok}/${targets.length}개 반영 (거리·페이스·심박·케이던스·날짜)` : '수치를 찾지 못했어요 · 스크린샷이 선명한지 확인 후 재시도');
+  toast(ok? `인식 완료 · ${ok}/${targets.length}개 반영 (거리·페이스·심박·케이던스)` : '수치를 찾지 못했어요 · 스크린샷이 선명한지 확인 후 재시도');
 }
 
 /* GPX / TCX / FIT 파싱 (Amazfit Active 3 · Zepp 내보내기 대응) */
@@ -2195,7 +2308,6 @@ async function attachImageToRecord(ex, item){
     if(item.p.avgPaceSec!=null) ex.avgPaceSec=item.p.avgPaceSec;
     if(item.p.avgHr!=null) ex.avgHr=item.p.avgHr;
     if(item.p.cadence!=null) ex.cadence=item.p.cadence;
-    if(item.iso) ex.date=item.iso;
   } else {           // 스플릿이 합류 → 빈 값만 보완 + 구간 데이터 저장
     if(item.splits && item.splits.length>=2){
       const better = !(ex.splits&&ex.splits.length>=2)
@@ -2315,6 +2427,7 @@ async function handleFiles(files){
       items.push(await buildImageItem(dataUrl, f.name, f.lastModified, ocrReady));
     }
     let recCount = 0, mergedCount = 0;
+    const newIds = [];
 
     // ── 같은 러닝 클러스터링: 거리·시간·페이스·심박·케이던스가 동일한 화면들을 하나의 기록으로 ──
     // 기존 이미지 기록을 시드로 두어, 새 사진이 기존 러닝에도 붙게 함(다른 배치 첨부 대응)
@@ -2343,10 +2456,12 @@ async function handleFiles(files){
     for(const g of newGroups){
       const rec = mergeImageGroup(g.add); const imgs = rec._images; delete rec._images;
       rec.imgKind = g.add.length>1 ? 'both' : (g.add[0].isSplit ? 'splits' : 'summary');
+      rec.date = dateFromLocalDay(localDay(new Date()));
+      rec.dateNeedsConfirm = true;
       await DB.put('records', rec);
       await DB.put('files', { id:rec.id, dataUrl:imgs[0] });
       for(let i=1;i<imgs.length;i++) await DB.put('files', { id:rec.id+'#'+i, dataUrl:imgs[i] });
-      state.records.push(rec); recCount++; added++;
+      state.records.push(rec); recCount++; added++; newIds.push(rec.id);
       if(g.add.length>1) mergedCount += g.add.length-1;
     }
     state.records.sort((a,b)=>new Date(b.date)-new Date(a.date));
@@ -2356,6 +2471,7 @@ async function handleFiles(files){
     const sample = (items[0] && items[0].p) || {};
     const hint = ` · ${sample.distanceKm!=null?sample.distanceKm+'km':'거리?'} · ♥${sample.avgHr||'-'} · ${sample.cadence||'-'}spm`;
     toast(`정리 완료 · 새 기록 ${recCount}개${mergedCount?` · 사진 ${mergedCount}장 같은 러닝에 매칭`:''}${hint}`);
+    if(newIds.length) openDateConfirmSheet(newIds);
   } else if(added){
     recompute(); await reclassifyAllAuto(); recompute(); renderRecords();
     toast(fileBad
@@ -2373,8 +2489,10 @@ function editRecord(id){
   const zSec = (k)=> z[k] && z[k].sec!=null ? fmtDuration(z[k].sec) : '';
   openSheet(`
     <h3>${id?'기록 편집':'러닝 기록 입력'}</h3>
-    <label class="f">날짜</label>
-    <input type="date" id="e_date" value="${isoDay(r.date)}">
+    <label class="f">러닝 일자</label>
+    <div class="cal-picked" id="e_date_lbl">${fmtDate(r.date)}</div>
+    <div id="e_cal"></div>
+    <input type="hidden" id="e_date" value="${localDay(r.date)}">
     <label class="f">훈련 종류</label>
     <select id="e_type">${opts}</select>
     <div class="inline">
@@ -2418,6 +2536,10 @@ function editRecord(id){
       <button class="btn primary block" id="e_save">저장</button>
     </div>
   `);
+  bindMonthCalendar($('#e_cal'), localDay(r.date), (ymd)=>{
+    $('#e_date').value = ymd;
+    $('#e_date_lbl').textContent = fmtDate(dateFromLocalDay(ymd));
+  });
   if(r.hasImage){ const b=$('#e_ocr'); if(b) b.onclick = async ()=>{
     b.textContent='인식 중…'; b.disabled=true;
     try{
@@ -2459,7 +2581,8 @@ function editRecord(id){
     const zm = { peak:'e_z_peak', high:'e_z_high', mid:'e_z_mid', focus:'e_z_focus', warmup:'e_z_warmup' };
     Object.keys(zm).forEach(k=>{ const v=parseZ(zm[k]); if(v) hrZones[k]=v; });
     const rec = { ...r,
-      date: new Date($('#e_date').value).toISOString(),
+      date: dateFromLocalDay($('#e_date').value),
+      dateNeedsConfirm: false,
       type: $('#e_type').value,
       distanceKm: dist,
       durationSec: durSec,
@@ -2500,10 +2623,12 @@ function openRecordReport(id){
       <h3>${fmtDate(r.date)} · ${t.label}</h3>
       <div class="empty" style="padding:18px 6px">이 기록엔 분석할 수치가 없어요.<br>${r.hasImage?'아래 버튼으로 이미지에서 인식하거나 ':''}직접 보정해 주세요.</div>
       <div class="row" style="margin-top:4px">
+        <button class="btn block" id="rr_date">📅 일자</button>
         ${r.hasImage?'<button class="btn block" id="rr_ocr">🔍 이미지에서 인식</button>':''}
         <button class="btn primary block" id="rr_edit">✏️ 직접 입력</button>
       </div>`);
     $('#rr_edit').onclick = ()=> editRecord(id);
+    $('#rr_date').onclick = ()=> openDateConfirmSheet([id]);
     if(r.hasImage){ const b=$('#rr_ocr'); if(b) b.onclick=async ()=>{ b.textContent='인식 중…'; b.disabled=true; try{ await applyOcrToRecord(r); }catch(e){} state.records.sort((a,b)=>new Date(b.date)-new Date(a.date)); recompute(); renderRecords(); openRecordReport(id); }; }
     return;
   }
@@ -2752,6 +2877,7 @@ function openRecordReport(id){
     <div style="display:flex;align-items:center;gap:8px;margin-bottom:2px">
       <span class="tag ${t.css}">${t.label}</span>
       <h3 style="margin:0">${fmtDate(r.date)}</h3>
+      <button class="btn sm" id="rr_date" style="margin-left:auto">📅 일자</button>
     </div>
     <div style="font-size:26px;font-weight:800;margin:6px 0 2px">${dist!=null?dist.toFixed(2)+' km':'—'} <span style="font-size:15px;color:var(--sub);font-weight:600">${pace?fmtPace(pace)+'/km':''}</span></div>
     ${r.hasImage?'<div id="rr_thumb" style="margin:8px 0"></div>':''}
@@ -2777,6 +2903,7 @@ function openRecordReport(id){
     <button class="btn block" id="rr_merge" style="margin-top:8px">🔗 다른 기록과 합치기(사진 모으기)</button>
     ${(r.imageCount>1)?'<button class="btn block" id="rr_split" style="margin-top:6px">✂️ 사진 분리(잘못 합쳐진 사진 떼기)</button>':''}`);
   $('#rr_edit').onclick = ()=> editRecord(id);
+  if($('#rr_date')) $('#rr_date').onclick = ()=> openDateConfirmSheet([id]);
   $('#rr_del').onclick = ()=> deleteRecord(id);
   $('#rr_close').onclick = ()=> closeSheet();
   $('#rr_merge').onclick = ()=> openMergePicker(id);
@@ -2988,7 +3115,7 @@ async function renderRecords(){
     return `<div class="rec" data-id="${r.id}">
       ${thumb}
       <div class="info">
-        <div class="a"><span class="tag ${t.css}">${t.label}</span> ${fmtDate(r.date)} ${r.needsReview?'<span style="color:var(--warn)">· 보정필요</span>':''}</div>
+        <div class="a"><span class="tag ${t.css}">${t.label}</span> ${fmtDate(r.date)} ${r.dateNeedsConfirm?'<span style="color:var(--warn)">· 일자확인</span>':''} ${r.needsReview?'<span style="color:var(--warn)">· 보정필요</span>':''}</div>
         <div class="b">${meta}</div>
       </div>
       <button class="del" data-del="${r.id}">✕</button>
