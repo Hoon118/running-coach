@@ -6,7 +6,7 @@
 'use strict';
 
 /* 앱 버전 (sw.js 캐시 버전과 동일하게 유지) */
-const APP_VERSION = 'v31';
+const APP_VERSION = 'v32';
 
 /* ---------- 세션 타입 정의 ---------- */
 const TYPES = {
@@ -354,7 +354,9 @@ function normalizeOcrText(text){
   t = t.replace(/킬\s*로\s*미\s*터/g,'킬로미터').replace(/거\s*리/g,'거리');
   t = t.replace(/경\s*사\s*도/g,'경사도').replace(/오\s*르\s*막/g,'오르막').replace(/내\s*리\s*막/g,'내리막');
   t = t.replace(/평\s*지/g,'평지').replace(/고\s*도/g,'고도').replace(/상\s*승/g,'상승').replace(/하\s*강/g,'하강');
-  t = t.replace(/비\s*행\s*시\s*간/g,'비행시간').replace(/보\s*폭/g,'보폭').replace(/분\s*포/g,'분포');
+  t = t.replace(/비\s*행\s*시\s*간/g,'비행시간').replace(/체\s*공\s*시\s*간/g,'비행시간');
+  t = t.replace(/보\s*폭/g,'보폭').replace(/분\s*포/g,'분포');
+  t = t.replace(/수직\s*진\s*동/g,'수직진폭').replace(/오르막\s*합계/g,'상승').replace(/내리막\s*합계/g,'하강');
   return t;
 }
 /* 라벨 근처 숫자 추출 (같은 줄·다음 줄·숫자 뒤 라벨) */
@@ -380,6 +382,106 @@ function pickNearLabel(text, labelRe, min, max){
     }
   }
   return null;
+}
+/* 라벨 카드의 평균·최고 한 쌍 (삼성헬스: 제목 아래 큰 숫자 2개) */
+function pickLabeledPair(text, labelRe, min, max, asFloat){
+  const lines = String(text||'').split(/[\n\r]+/);
+  const parseTok = (s)=>{
+    const n = asFloat ? parseFloat(String(s).replace(',','.')) : parseInt(s,10);
+    return (n>=min && n<=max) ? n : null;
+  };
+  for(let i=0;i<lines.length;i++){
+    if(!labelRe.test(lines[i])) continue;
+    const blob = [lines[i], lines[i+1]||'', lines[i+2]||'', lines[i+3]||''].join(' ');
+    const re = asFloat
+      ? /(\d{1,3}(?:[.,]\d+)?)/g
+      : /(\d{2,3})(?!\d)/g;
+    const nums = [];
+    let mm;
+    while((mm = re.exec(blob)) && nums.length<6){
+      const v = parseTok(mm[1]);
+      if(v!=null) nums.push(v);
+    }
+    if(nums.length>=2) return { avg:nums[0], extra:nums[1] };
+    if(nums.length===1) return { avg:nums[0], extra:null };
+  }
+  return null;
+}
+function parsePaceToken(a, b){
+  const s = (+a)*60 + (+b);
+  return (s>=150 && s<=1200) ? s : null;
+}
+/* 페이스 토큰을 km로 오인하지 않게 거리만 고른다 */
+function parseDistanceKm(t){
+  const labeled = t.match(/(?:총\s*)?거리\D{0,16}(\d{1,3}(?:[.,]\d{1,2}))\s*(?:k\s*m|킬로)?/i);
+  if(labeled){
+    const v = parseFloat(labeled[1].replace(',','.'));
+    if(v>0.05 && v<300) return v;
+  }
+  const cands = [];
+  const re = /(\d{1,3}(?:[.,]\d{1,2}))\s*(?:k\s*m|킬로)/gi;
+  let mm;
+  while((mm = re.exec(t))){
+    const v = parseFloat(mm[1].replace(',','.'));
+    if(!(v>0.05 && v<300)) continue;
+    const from = Math.max(0, mm.index-18);
+    const ctx = t.slice(from, mm.index+mm[0].length+8);
+    // 05'37"/km · 5'10"/km 같은 페이스를 거리로 읽지 않음
+    if(/['’‘`´′:]\s*\d{2}/.test(ctx) || /\/\s*k\s*m/i.test(ctx)) continue;
+    if(/페이스|최고|베스트|예측|목표|5\s*k\b|10\s*k/i.test(ctx) && v>=3.5 && v<=12) continue;
+    cands.push(v);
+  }
+  if(!cands.length) return null;
+  // 1.00 같은 정수 km(구간)보다 1.11 같은 총거리를 우선
+  const partials = cands.filter(v=> Math.abs(v-Math.round(v))>0.02);
+  const pool = partials.length ? partials : cands;
+  // 최댓값이 아니라, 페이스대(4~8)로 보이는 값보다 짧은 실거리를 고름
+  const short = pool.filter(v=> v<3.2);
+  if(short.length) return Math.max(...short);
+  return Math.max(...pool);
+}
+function parseDurationSec(t){
+  let m = t.match(/(?:운동\s*시간|총\s*시간|소요\s*시간|duration)\D{0,12}(\d{1,2})\s*:\s*(\d{2})\s*:\s*(\d{2})/i);
+  if(m) return (+m[1])*3600+(+m[2])*60+(+m[3]);
+  m = t.match(/(\d{1,2})\s*:\s*(\d{2})\s*:\s*(\d{2})/);
+  if(m){
+    const s = (+m[1])*3600+(+m[2])*60+(+m[3]);
+    if(s>=20 && s<=12*3600) return s;
+  }
+  const hh = t.match(/(\d{1,2})\s*시간/), mn = t.match(/(\d{1,3})\s*분/), ss = t.match(/(\d{1,2})\s*초/);
+  if(hh||mn) return (hh?+hh[1]*3600:0)+(mn?+mn[1]*60:0)+(ss?+ss[1]:0);
+  m = t.match(/(?:운동\s*시간|총\s*시간|소요\s*시간|duration)\D{0,12}(\d{1,2})\s*:\s*(\d{2})(?!\s*:\s*\d)/i);
+  if(m){ const s=(+m[1])*60+(+m[2]); if(s>=20&&s<=5*3600) return s; }
+  // 삼성헬스 상단 mm:ss (거리 바로 옆). 페이스(4'50"~8'00")와 겹치지 않게 20초~3시간
+  const top = t.slice(0, 280);
+  m = top.match(/\b(\d{1,2})\s*:\s*(\d{2})\b(?!\s*:\s*\d)/);
+  if(m){ const s=(+m[1])*60+(+m[2]); if(s>=90 && s<=3*3600) return s; }
+  return null;
+}
+function reconcileRunMetrics(out){
+  const d=out.distanceKm, t=out.durationSec, p=out.avgPaceSec;
+  if(d && t){
+    const calc = t/d;
+    // 5km / 6분처럼 불가능한 조합 → 거리 과대(페이스를 km로 읽음)
+    if(calc<160 && d>=2.5){
+      if(p && p>=180 && p<=900){
+        const d2 = t/p;
+        if(d2>0.15 && d2<d*0.7) out.distanceKm = +d2.toFixed(2);
+      } else {
+        delete out.distanceKm;
+      }
+    } else if(!p && calc>=160 && calc<=1200){
+      out.avgPaceSec = calc;
+    }
+  }
+  if(out.distanceKm && out.avgPaceSec && !out.durationSec){
+    const s = Math.round(out.avgPaceSec * out.distanceKm);
+    if(s>=20 && s<=12*3600) out.durationSec = s;
+  }
+  if(out.distanceKm && out.durationSec && !out.avgSpeedKmh){
+    out.avgSpeedKmh = +(out.distanceKm / (out.durationSec/3600)).toFixed(2);
+  }
+  return out;
 }
 /* Zepp 경사도 분포: 급경사 오르막/오르막/평지/내리막/급경사 내리막 + % */
 function parseGradeDist(text){
@@ -463,53 +565,55 @@ function parseDurToken(str){
 function parseTextMetrics(text){
   const out = {};
   const t = normalizeOcrText(text);
-  // 거리: km/킬로 값 중 최댓값(총거리)
-  let dist = 0;
-  for(const mm of t.matchAll(/(\d{1,3}[.,]\d{1,2})\s*(?:k\s*m|킬로)/gi)){
-    const v = parseFloat(mm[1].replace(',','.')); if(v>dist && v<300) dist = v;
-  }
-  if(!dist){ const one = t.match(/(\d{1,3}[.,]\d{1,2})\s*(?:k\s*m|킬로)/i); if(one) dist=parseFloat(one[1].replace(',','.')); }
-  if(dist>0) out.distanceKm = dist;
-  // 시간: h:mm:ss 우선 → 한글 → Zepp 요약의 mm:ss(운동시간/총시간 라벨 근처만)
-  let m = t.match(/(\d{1,2}):(\d{2}):(\d{2})/);
-  if(m){ out.durationSec = (+m[1])*3600+(+m[2])*60+(+m[3]); }
-  else {
-    const hh = t.match(/(\d{1,2})\s*시간/), mn = t.match(/(\d{1,3})\s*분/), ss = t.match(/(\d{1,2})\s*초/);
-    if(hh||mn){ out.durationSec = (hh?+hh[1]*3600:0)+(mn?+mn[1]*60:0)+(ss?+ss[1]:0); }
-    else {
-      const dm = t.match(/(?:운동\s*시간|총\s*시간|소요\s*시간|duration|time)\D{0,12}(\d{1,2})\s*:\s*(\d{2})(?!\s*:\s*\d)/i);
-      if(dm){ const s=(+dm[1])*60+(+dm[2]); if(s>=60&&s<=5*3600) out.durationSec=s; }
+  const dist = parseDistanceKm(t);
+  if(dist) out.distanceKm = dist;
+  const dur = parseDurationSec(t);
+  if(dur) out.durationSec = dur;
+  // 페이스: 라벨 우선 → /km → 카드 평균·최고
+  let m = t.match(/(?:평균\s*)?페이스\D{0,12}(\d{1,2})\s*['’‘`´′:]\s*(\d{2})/i)
+    || t.match(/(\d{1,2})\s*['’‘`´′:]\s*(\d{2})\s*["”“''′″]?\s*\/\s*k\s*m/i);
+  if(m){ const s=parsePaceToken(m[1], m[2]); if(s) out.avgPaceSec=s; }
+  m = t.match(/(?:최고|베스트|best)\s*페이스\D{0,12}(\d{1,2})\s*['’‘`´′:]\s*(\d{2})/i);
+  if(m){ const s=parsePaceToken(m[1], m[2]); if(s) out.bestPaceSec=s; }
+  if(out.avgPaceSec==null || out.bestPaceSec==null){
+    const pl = t.match(/페이스[\s\S]{0,80}?(\d{1,2})\s*['’‘`´′:]\s*(\d{2})[\s\S]{0,24}(\d{1,2})\s*['’‘`´′:]\s*(\d{2})/i);
+    if(pl){
+      const a=parsePaceToken(pl[1],pl[2]), b=parsePaceToken(pl[3],pl[4]);
+      if(a && out.avgPaceSec==null) out.avgPaceSec=a;
+      if(b && out.bestPaceSec==null) out.bestPaceSec=Math.min(a||b,b);
     }
   }
-  // 페이스: m'ss"/km, m:ss/km, m′ss″ 등 (첫 매치 = 평균)
-  m = t.match(/(\d{1,2})\s*['’‘`´′:]\s*(\d{2})\s*["”“''′″]?\s*\/?\s*k\s*m/i)
-    || t.match(/(?:평균\s*)?페이스\D{0,8}(\d{1,2})\s*['’‘`´′:]\s*(\d{2})/);
-  if(m){ const s=(+m[1])*60+(+m[2]); if(s>=120&&s<=1200) out.avgPaceSec=s; }
-  // 최고 페이스
-  m = t.match(/(?:최고|베스트|best)\s*페이스\D{0,8}(\d{1,2})\s*['’‘`´′:]\s*(\d{2})/i);
-  if(m){ const s=(+m[1])*60+(+m[2]); if(s>=120&&s<=1200) out.bestPaceSec=s; }
-  // 심박: 평균 / 최고 (Zepp: "심박수 168" / 세로 배치)
-  m = t.match(/평균\s*심박(?:수)?\D{0,12}(\d{2,3})/i)
-    || t.match(/심박(?:수)?\D{0,8}평균\D{0,8}(\d{2,3})/i)
-    || t.match(/(\d{2,3})\s*bpm/i)
-    || t.match(/심박(?:수)?\D{0,8}(\d{2,3})/i);
-  if(m){ const v=+m[1]; if(v>=60&&v<=230) out.avgHr=v; }
-  if(out.avgHr==null){ const v=pickNearLabel(t, /심박(?:수)?|heart\s*rate|\bHR\b/i, 60, 230); if(v!=null) out.avgHr=v; }
-  m = t.match(/최고\s*심박(?:수)?\D{0,12}(\d{2,3})/i)
-    || t.match(/심박(?:수)?\D{0,8}최고\D{0,8}(\d{2,3})/i)
-    || t.match(/max(?:imum)?\s*h(?:eart)?\s*r(?:ate)?\D{0,8}(\d{2,3})/i);
-  if(m){ const v=+m[1]; if(v>=60&&v<=230) out.hrMax=v; }
-  // 케이던스: 평균 / 최고
-  m = t.match(/평균\s*케이던스\D{0,12}(\d{2,3})/i)
-    || t.match(/케이던스\D{0,8}평균\D{0,8}(\d{2,3})/i)
-    || t.match(/(\d{2,3})\s*spm/i)
-    || t.match(/케이던스\D{0,8}(\d{2,3})/i)
-    || t.match(/cadence\D{0,8}(\d{2,3})/i);
-  if(m){ const v=+m[1]; if(v>=100&&v<=260) out.cadence=v; }
-  if(out.cadence==null){ const v=pickNearLabel(t, /케이던스|cadence/i, 100, 260); if(v!=null) out.cadence=v; }
-  m = t.match(/최고\s*케이던스\D{0,12}(\d{2,3})/i)
-    || t.match(/케이던스\D{0,8}최고\D{0,8}(\d{2,3})/i);
-  if(m){ const v=+m[1]; if(v>=100&&v<=260) out.cadMax=v; }
+  // 심박: 카드 쌍(144 / 157) 우선
+  const hrPair = pickLabeledPair(t, /심박(?:수)?(?!\s*구간)|heart\s*rate|\bHR\b/i, 60, 230, false);
+  if(hrPair){ out.avgHr=hrPair.avg; if(hrPair.extra!=null) out.hrMax=Math.max(hrPair.avg, hrPair.extra); }
+  if(out.avgHr==null){
+    m = t.match(/평균\s*심박(?:수)?\D{0,12}(\d{2,3})/i)
+      || t.match(/(\d{2,3})\s*bpm/i)
+      || t.match(/심박(?:수)?\D{0,8}(\d{2,3})/i);
+    if(m){ const v=+m[1]; if(v>=60&&v<=230) out.avgHr=v; }
+  }
+  if(out.hrMax==null){
+    m = t.match(/최고\s*심박(?:수)?\D{0,12}(\d{2,3})/i)
+      || t.match(/max(?:imum)?\s*h(?:eart)?\s*r(?:ate)?\D{0,8}(\d{2,3})/i);
+    if(m){ const v=+m[1]; if(v>=60&&v<=230) out.hrMax=v; }
+  }
+  // 케이던스
+  const cadPair = pickLabeledPair(t, /케이던스|cadence/i, 100, 260, false);
+  if(cadPair){ out.cadence=cadPair.avg; if(cadPair.extra!=null) out.cadMax=Math.max(cadPair.avg, cadPair.extra); }
+  if(out.cadence==null){
+    m = t.match(/평균\s*케이던스\D{0,12}(\d{2,3})/i)
+      || t.match(/(\d{2,3})\s*spm/i)
+      || t.match(/케이던스\D{0,8}(\d{2,3})/i);
+    if(m){ const v=+m[1]; if(v>=100&&v<=260) out.cadence=v; }
+  }
+  if(out.cadMax==null){
+    m = t.match(/최고\s*케이던스\D{0,12}(\d{2,3})/i);
+    if(m){ const v=+m[1]; if(v>=100&&v<=260) out.cadMax=v; }
+  }
+  // 평균 속도
+  m = t.match(/평균\s*속도\D{0,12}(\d{1,2}(?:[.,]\d+)?)\s*k\s*m/i)
+    || t.match(/(\d{1,2}(?:[.,]\d+)?)\s*k\s*m\s*\/\s*h/i);
+  if(m){ const v=parseFloat(m[1].replace(',','.')); if(v>=3&&v<=30) out.avgSpeedKmh=v; }
   // 칼로리
   m = t.match(/(\d{2,4})\s*k\s*cal/i) || t.match(/(?:칼로리|열량)\D{0,8}(\d{2,4})/i);
   if(m) out.calories = +m[1];
@@ -520,6 +624,13 @@ function parseTextMetrics(text){
   m = t.match(/최고\s*지면\s*접촉\s*시간\D{0,16}(\d{2,4})\s*m\s*s/i)
     || t.match(/지면\s*접촉\s*시간\D{0,40}최고\D{0,12}(\d{2,4})\s*m\s*s/i);
   if(m){ const v=+m[1]; if(v>=150&&v<=500) out.gctMaxMs=v; }
+  m = t.match(/최저\s*지면\s*접촉\s*시간\D{0,16}(\d{2,4})\s*m\s*s/i)
+    || t.match(/지면\s*접촉\s*시간\D{0,40}최저\D{0,12}(\d{2,4})\s*m\s*s/i);
+  if(m){ const v=+m[1]; if(v>=120&&v<=500) out.gctMinMs=v; }
+  if(out.gctMs==null){
+    const gp = pickLabeledPair(t, /지면\s*접촉|GCT/i, 150, 500, false);
+    if(gp){ out.gctMs=gp.avg; if(gp.extra!=null) out.gctMaxMs=Math.max(gp.avg, gp.extra); }
+  }
   m = t.match(/지면\s*접촉\s*시간\s*밸런스\D{0,20}(\d{1,2}(?:[.,]\d+)?)\s*%?\s*[\/L좌]?\D{0,8}(\d{1,2}(?:[.,]\d+)?)\s*%/i);
   if(m){ out.gctBalanceL=parseFloat(m[1].replace(',','.')); out.gctBalanceR=parseFloat(m[2].replace(',','.')); }
   // 비행 시간
@@ -527,15 +638,19 @@ function parseTextMetrics(text){
   if(m){ const v=+m[1]; if(v>=20&&v<=200) out.flightMs=v; }
   m = t.match(/최고\s*비행\s*시간\D{0,16}(\d{2,3})\s*m\s*s/i);
   if(m){ const v=+m[1]; if(v>=20&&v<=200) out.flightMaxMs=v; }
-  // 보폭 (cm) — 라벨 근처·cm 생략 허용
-  m = t.match(/평균\s*보폭\D{0,16}(\d{2,3})\s*c?\s*m?/i)
-    || t.match(/보폭\D{0,20}(\d{2,3})\s*cm/i)
-    || t.match(/stride\D{0,12}(\d{2,3})\s*cm/i);
-  if(m){ const v=+m[1]; if(v>=40&&v<=200) out.strideCm=v; }
-  if(out.strideCm==null){ const v=pickNearLabel(t, /보폭|stride/i, 40, 200); if(v!=null) out.strideCm=v; }
-  m = t.match(/최고\s*보폭\D{0,12}(\d{2,3})\s*c?\s*m?/i)
-    || t.match(/보폭\D{0,24}최고\D{0,12}(\d{2,3})/i);
-  if(m){ const v=+m[1]; if(v>=40&&v<=200) out.strideMaxCm=v; }
+  // 보폭 (cm) — 삼성헬스 평균/최고 쌍
+  const stPair = pickLabeledPair(t, /보폭|stride/i, 40, 200, false);
+  if(stPair){ out.strideCm=stPair.avg; if(stPair.extra!=null) out.strideMaxCm=Math.max(stPair.avg, stPair.extra); }
+  if(out.strideCm==null){
+    m = t.match(/평균\s*보폭\D{0,16}(\d{2,3})\s*c?\s*m?/i)
+      || t.match(/보폭\D{0,20}(\d{2,3})\s*cm/i)
+      || t.match(/stride\D{0,12}(\d{2,3})\s*cm/i);
+    if(m){ const v=+m[1]; if(v>=40&&v<=200) out.strideCm=v; }
+  }
+  if(out.strideMaxCm==null){
+    m = t.match(/최고\s*보폭\D{0,12}(\d{2,3})\s*c?\s*m?/i);
+    if(m){ const v=+m[1]; if(v>=40&&v<=200) out.strideMaxCm=v; }
+  }
   // 고도 · 상승/하강
   m = t.match(/(?:총\s*)?(?:누적\s*)?상승(?:\s*고도)?\D{0,16}(\d{1,4})\s*m(?!\s*s)/i)
     || t.match(/(?:total\s*)?ascent\D{0,12}(\d{1,4})\s*m/i)
@@ -547,8 +662,12 @@ function parseTextMetrics(text){
   if(m){ const v=+m[1]; if(v>=0&&v<=9000) out.descentM=v; }
   m = t.match(/최고\s*고도\D{0,12}(\d{1,4})\s*m/i) || t.match(/max(?:imum)?\s*(?:elev|alt)\D{0,12}(\d{1,4})\s*m/i);
   if(m){ const v=+m[1]; if(v>=-100&&v<=9000) out.elevMaxM=v; }
-  m = t.match(/최저\s*고도\D{0,12}(\d{1,4})\s*m/i) || t.match(/min(?:imum)?\s*(?:elev|alt)\D{0,12}(\d{1,4})\s*m/i);
-  if(m){ const v=+m[1]; if(v>=-100&&v<=9000) out.elevMinM=v; }
+  m = t.match(/최저\s*고도\D{0,12}(-?\d{1,4})\s*m/i) || t.match(/min(?:imum)?\s*(?:elev|alt)\D{0,12}(-?\d{1,4})\s*m/i);
+  if(m){ const v=+m[1]; if(v>=-200&&v<=9000) out.elevMinM=v; }
+  m = t.match(/오르막\s*합계\D{0,12}(\d{1,4})\s*m/i);
+  if(m && out.ascentM==null){ const v=+m[1]; if(v>=0&&v<=9000) out.ascentM=v; }
+  m = t.match(/내리막\s*합계\D{0,12}(\d{1,4})\s*m/i);
+  if(m && out.descentM==null){ const v=+m[1]; if(v>=0&&v<=9000) out.descentM=v; }
   // VO2 Max
   m = t.match(/VO2\s*Max\D{0,10}(\d{2}(?:[.,]\d)?)/i) || t.match(/최대\s*산소\s*섭취\D{0,10}(\d{2}(?:[.,]\d)?)/i);
   if(m){ const v=parseFloat(m[1].replace(',','.')); if(v>=20&&v<=90) out.vo2max=v; }
@@ -556,9 +675,12 @@ function parseTextMetrics(text){
   const gd = parseGradeDist(t);
   if(gd) out.gradeDist = gd;
   // 수직 진폭 / 수직 비
-  m = t.match(/수직\s*진폭\D{0,16}(\d{1,2}(?:[.,]\d+)?)\s*cm/i);
+  m = t.match(/수직\s*(?:진폭|진동)\D{0,16}(\d{1,2}(?:[.,]\d+)?)\s*cm/i);
   if(m) out.vertOscCm = parseFloat(m[1].replace(',','.'));
-  if(out.vertOscCm==null){ const v=pickNearLabel(t, /수직\s*진폭|vertical\s*osc/i, 3, 20); if(v!=null) out.vertOscCm=v; }
+  if(out.vertOscCm==null){
+    const vp = pickLabeledPair(t, /수직\s*(?:진폭|진동)|vertical\s*osc/i, 3, 20, true);
+    if(vp){ out.vertOscCm=vp.avg; }
+  }
   m = t.match(/수직\s*비\D{0,16}(\d{1,2}(?:[.,]\d+)?)\s*%/i);
   if(m) out.vertRatioPct = parseFloat(m[1].replace(',','.'));
   // 훈련 효과
@@ -569,24 +691,27 @@ function parseTextMetrics(text){
   // 심박 영역(Zepp): 최고/고/중/저(집중)·워밍업 — 시간·비율
   const hrZones = {};
   const zoneRules = [
-    ['peak',   /최고\s*강도|무\s*산소(?!\s*소모)|peak|anaerobic/i],
-    ['high',   /고\s*강도(?!\s*훈련\s*효과)|유\s*산소\s*강도|intensive/i],
-    ['mid',    /중\s*강도|집중(?!\s*훈련)|aerobic(?!\s*effect)|moderate/i],
-    ['focus',  /저\s*강도|집중\s*훈련|지방\s*연소|fat\s*burn/i],
-    ['warmup', /워\s*밍\s*업|warm\s*-?\s*up/i]
+    ['peak',   /최고\s*강도|무\s*산소(?!\s*소모)|최대(?!\s*산소)|peak|anaerobic/i],
+    ['high',   /고\s*강도(?!\s*훈련\s*효과)|유\s*산소\s*강도|intensive|hard/i],
+    ['mid',    /중\s*강도|중간|moderate/i],
+    ['focus',  /저\s*강도|가벼움|light|지방\s*연소|fat\s*burn/i],
+    ['warmup', /워\s*밍\s*업|이완|relax|warm\s*-?\s*up/i]
   ];
   for(const [key, re] of zoneRules){
-    const rm = t.match(new RegExp(re.source + '[^\\d%]{0,40}(\\d{1,2}\\s*:\\s*\\d{2})[^\\d%]{0,12}(\\d{1,3})\\s*%','i'));
+    const rm = t.match(new RegExp(re.source + '[^\\d%]{0,40}(\\d{1,2}\\s*:\\s*\\d{2})[^\\d%]{0,16}(\\d{1,3}(?:[.,]\\d+)?)\\s*%','i'))
+      || t.match(new RegExp(re.source + '[^\\d%]{0,40}(\\d{1,3}(?:[.,]\\d+)?)\\s*%[^\\d%]{0,16}(\\d{1,2}\\s*:\\s*\\d{2})','i'));
     if(rm){
-      const sec = parseDurToken(rm[1]);
-      const pct = +rm[2];
-      if(sec!=null) hrZones[key] = { sec, pct: (pct>=0&&pct<=100)?pct:null };
+      const timeTok = /:/.test(rm[1]) ? rm[1] : rm[2];
+      const pctTok = /:/.test(rm[1]) ? rm[2] : rm[1];
+      const sec = parseDurToken(timeTok);
+      const pct = parseFloat(String(pctTok).replace(',','.'));
+      hrZones[key] = { sec: sec, pct: (pct>=0&&pct<=100)?pct:null };
     } else {
       const rm2 = t.match(new RegExp(re.source + '[^\\d%]{0,40}(\\d{1,2}\\s*:\\s*\\d{2})','i'));
       if(rm2){ const sec=parseDurToken(rm2[1]); if(sec!=null) hrZones[key]={ sec, pct:null }; }
       else {
-        const rm3 = t.match(new RegExp(re.source + '[^\\d%]{0,40}(\\d{1,3})\\s*%','i'));
-        if(rm3){ const pct=+rm3[1]; if(pct>=0&&pct<=100) hrZones[key]={ sec:null, pct }; }
+        const rm3 = t.match(new RegExp(re.source + '[^\\d%]{0,40}(\\d{1,3}(?:[.,]\\d+)?)\\s*%','i'));
+        if(rm3){ const pct=parseFloat(rm3[1].replace(',','.')); if(pct>=0&&pct<=100) hrZones[key]={ sec:null, pct }; }
       }
     }
   }
@@ -603,15 +728,15 @@ function parseTextMetrics(text){
   // 파생: 페이스<->시간/거리
   if(out.distanceKm && out.durationSec && !out.avgPaceSec) out.avgPaceSec = out.durationSec / out.distanceKm;
   if(out.distanceKm && out.avgPaceSec && !out.durationSec) out.durationSec = Math.round(out.avgPaceSec * out.distanceKm);
-  return out;
+  return reconcileRunMetrics(out);
 }
 
 const DETAIL_METRIC_KEYS = [
   'distanceKm','durationSec','avgPaceSec','bestPaceSec','avgHr','hrMin','hrMax',
-  'cadence','cadMin','cadMax','calories','gctMs','gctMaxMs','gctBalanceL','gctBalanceR',
+  'cadence','cadMin','cadMax','calories','gctMs','gctMaxMs','gctMinMs','gctBalanceL','gctBalanceR',
   'flightMs','flightMaxMs','strideCm','strideMaxCm','vertOscCm','vertRatioPct',
   'teAerobic','teAnaerobic','hrZones','paceFast','paceSlow',
-  'ascentM','descentM','elevMaxM','elevMinM','vo2max','gradeDist'
+  'ascentM','descentM','elevMaxM','elevMinM','vo2max','gradeDist','avgSpeedKmh'
 ];
 function assignDetailMetrics(target, src){
   let changed = false;
@@ -661,7 +786,7 @@ function rangeBarHtml(min, avg, max, color, unit){
     <div class="range-lab"><span>${lo}${unit||''}</span><span style="color:${color};font-weight:800">${a}${unit||''}</span><span>${hi}${unit||''}</span></div>`;
 }
 
-/* 스플릿(구간) 표 파싱: Zepp "1 5'08" 5'08" 162 163" / 애플 "1 04:50 4'50" 155BPM 175SPM" */
+/* 스플릿(구간) 표만 파싱. 페이스/심박 카드·그래프 숫자는 구간으로 보지 않음 */
 function parseSplits(text){
   const rows = [];
   const seen = new Set();
@@ -669,11 +794,6 @@ function parseSplits(text){
     if(!(tSec>=12 && tSec<=1200 && pace>=120 && pace<=1200)) return;
     if(hr!=null && !(hr>=70 && hr<=230)) hr=null;
     if(cad!=null && !(cad>=100 && cad<=260)) cad=null;
-    // 심박·케이던스 자리 바뀜 보정 (케이던스가 심박보다 작게 나온 경우 등)
-    if(hr!=null && cad!=null && cad<120 && hr>=140 && hr<=200){ /* keep */ }
-    if(hr!=null && cad!=null && hr>=100 && hr<=130 && cad>=150 && cad<=210){
-      // 가끔 OCR이 순서를 바꿈: 작은 값이 심박·큰 값이 케이던스가 정상
-    }
     const km = kmHint!=null ? kmHint : +((tSec/pace).toFixed(3));
     const key = `${Math.round(tSec)}|${Math.round(pace)}|${hr||0}|${cad||0}`;
     if(seen.has(key)) return;
@@ -681,59 +801,49 @@ function parseSplits(text){
     rows.push({ tSec, pace, hr, cad, km });
   };
   const t = normalizeOcrText(text||'');
+  const inSplitSection = /구간\s*(?:별)?\s*기록|스\s*플\s*릿|lap\s*split|킬로미터\s*기록/i.test(t);
   const lines = t.split(/[\n\r]+/);
   for(const raw of lines){
     const line = raw.trim(); if(!line || rows.length>=80) continue;
-    // Zepp 전용: [km] 구간시간 [페이스] 심박 케이던스 (bpm/spm 없어도 OK)
-    let zm = line.match(/^(?:(\d{1,2}(?:[.,]\d{1,2})?)\s*(?:k\s*m|킬로)?\s+)?(\d{1,2})\s*['’‘`´′:]\s*(\d{2})\s*["”“''′″]?\s+(?:(\d{1,2})\s*['’‘`´′:]\s*(\d{2})\s*["”“''′″]?\s+)?(\d{2,3})\s*(?:bpm)?\s+(\d{2,3})\s*(?:spm)?\s*$/i);
+    if(/페이스|심박수|케이던스|고도|보폭|수직|지면|파워|칼로리|경사|분포|존|zone/i.test(line) && !/구간\s*(?:별)?\s*기록/.test(line)) continue;
+    // 삼성헬스: 1.00 km  05'37"   /  0.11 km  00'36"  05'29"
+    let sm = line.match(/^(\d{1,2}(?:[.,]\d{1,2})?)\s*(?:k\s*m|킬로)\s+(\d{1,2})\s*['’‘`´′:]\s*(\d{2})(?:\s+(\d{1,2})\s*['’‘`´′:]\s*(\d{2}))?/i);
+    if(sm){
+      const kmHint = parseFloat(String(sm[1]).replace(',','.'));
+      const tSec = (+sm[2])*60+(+sm[3]);
+      const pace = sm[4]!=null ? (+sm[4])*60+(+sm[5]) : (kmHint>0 && kmHint<1.01 ? Math.round(tSec/Math.max(kmHint,0.05)) : tSec);
+      pushRow(tSec, pace, null, null, (kmHint>0 && kmHint<=1.5)?kmHint:null);
+      continue;
+    }
+    // Zepp 표: 1  5'08"  5'08"  162  163
+    let zm = line.match(/^(\d{1,2}(?:[.,]\d{1,2})?)\s+(?:k\s*m\s+)?(\d{1,2})\s*['’‘`´′:]\s*(\d{2})\s*["”“''′″]?\s+(\d{1,2})\s*['’‘`´′:]\s*(\d{2})\s*["”“''′″]?\s+(\d{2,3})\s*(?:bpm)?\s+(\d{2,3})\s*(?:spm)?\s*$/i);
     if(zm){
       const tSec = (+zm[2])*60+(+zm[3]);
-      const pace = zm[4]!=null ? (+zm[4])*60+(+zm[5]) : tSec;
-      let hr=+zm[6], cad=+zm[7];
-      // 값이 케이던스 대역만 두 개면 순서 유지: 보통 심박≤케이던스인 경우가 많진 않음 — 범위로 판별
-      if(hr>=100 && cad>=100){
-        // 첫 숫자가 심박(보통 140~190), 둘째가 케이던스(150~180) — 그대로
-        if(hr>210 || (cad<100)){ const tmp=hr; hr=cad; cad=tmp; }
-      }
-      const kmHint = zm[1]!=null ? parseFloat(String(zm[1]).replace(',','.')) : null;
-      pushRow(tSec, pace, hr, cad, (kmHint!=null && kmHint>0 && kmHint<=1.5)?kmHint:null);
+      const pace = (+zm[4])*60+(+zm[5]);
+      pushRow(tSec, pace, +zm[6], +zm[7], null);
       continue;
     }
-    // 줄 단위 관대한 파서: 한 줄에 시간형 토큰 2개 + 심박/케이던스
     const toks = [...line.matchAll(/(\d{1,2})\s*[:'’‘`´′″"]\s*(\d{2})(?!\d)/g)];
-    if(toks.length >= 1){
-      const tSec = (+toks[0][1])*60 + (+toks[0][2]);
-      const pace = toks.length>=2 ? (+toks[1][1])*60 + (+toks[1][2]) : tSec;
-      if(!(tSec>=12 && tSec<=1200 && pace>=120 && pace<=1200)) continue;
-      let hr=null, cad=null;
-      const bpm = line.match(/(\d{2,3})\s*bpm/i); if(bpm) hr=+bpm[1];
-      const spm = line.match(/(\d{2,3})\s*spm/i); if(spm) cad=+spm[1];
-      if(hr==null || cad==null){
-        // 시간 토큰 이후 남은 2~3자리 숫자 (구간번호·초 제외)
-        const after = line.slice(toks[toks.length-1].index + toks[toks.length-1][0].length);
-        const nums = [...after.matchAll(/(\d{2,3})(?!\d)/g)].map(x=>+x[1]);
-        for(const n of nums){
-          if(hr==null && n>=70 && n<=230){ hr=n; continue; }
-          if(cad==null && n>=100 && n<=260){ cad=n; }
-        }
+    if(toks.length < 1) continue;
+    const startsWithLap = /^(\d{1,2}(?:[.,]\d{1,2})?)\s/.test(line);
+    const bpm = line.match(/(\d{2,3})\s*bpm/i);
+    const spm = line.match(/(\d{2,3})\s*spm/i);
+    // 페이스 카드(평균+최고)만 있는 줄은 제외. 구간행은 랩번호 또는 bpm+spm
+    if(!startsWithLap && !(bpm && spm) && !inSplitSection) continue;
+    if(toks.length>=2 && !startsWithLap && !bpm && !spm) continue;
+    const tSec = (+toks[0][1])*60 + (+toks[0][2]);
+    const pace = toks.length>=2 ? (+toks[1][1])*60 + (+toks[1][2]) : tSec;
+    if(!(tSec>=12 && tSec<=1200 && pace>=120 && pace<=1200)) continue;
+    let hr = bpm ? +bpm[1] : null, cad = spm ? +spm[1] : null;
+    if((hr==null || cad==null) && startsWithLap){
+      const after = line.slice(toks[toks.length-1].index + toks[toks.length-1][0].length);
+      const nums = [...after.matchAll(/(\d{2,3})(?!\d)/g)].map(x=>+x[1]);
+      for(const n of nums){
+        if(hr==null && n>=70 && n<=230){ hr=n; continue; }
+        if(cad==null && n>=100 && n<=260){ cad=n; }
       }
-      // 시간 토큰이 1개뿐이고 hr/cad가 있으면 페이스=구간시간으로 간주(완전 km)
-      if(toks.length===1 && (hr!=null||cad!=null) && !(tSec>=120 && tSec<=1200)){
-        // tSec이 페이스 대역이 아니면 스킵했을 수 있음 — 위에서 pace=tSec로 이미 처리
-      }
-      if(toks.length>=2 || hr!=null || cad!=null){
-        pushRow(tSec, pace, hr, cad, null);
-      }
-      continue;
     }
-  }
-  // 전체 텍스트 글로벌 스캔: 줄바꿈으로 깨진 표 복구
-  if(rows.length < 2){
-    const re = /(\d{1,2})\s*['’‘`´′:]\s*(\d{2})\s*["”“''′″]?\s+(\d{1,2})\s*['’‘`´′:]\s*(\d{2})\s*["”“''′″]?\s+(\d{2,3})\s+(\d{2,3})/g;
-    let gm;
-    while((gm = re.exec(t)) && rows.length<80){
-      pushRow((+gm[1])*60+(+gm[2]), (+gm[3])*60+(+gm[4]), +gm[5], +gm[6], null);
-    }
+    if(startsWithLap || (hr!=null && cad!=null)) pushRow(tSec, pace, hr, cad, null);
   }
   return rows;
 }
@@ -744,11 +854,12 @@ function parseIntervalPhases(text){
   const phases = []; let repIdx = 0;
   for(const raw of lines){
     const line = raw.trim(); if(!line || phases.length>=60) continue;
+    if(/구간\s*분포|구간\s*별|심박수|케이던스|페이스|경사도|고도/.test(line)) continue;
     let kind = null;
-    if(/워\s*밍\s*업|warm/i.test(line)) kind='warmup';
+    if(/워\s*밍\s*업|warm/i.test(line) && !/존|zone|분포|심박/.test(line)) kind='warmup';
     else if(/쿨\s*다운|cool/i.test(line)) kind='cooldown';
     else if(/회\s*복|휴\s*식|조\s*깅|recover|rest/i.test(line)) kind='recovery';
-    else if(/러\s*닝|구\s*간|인\s*터\s*벌|반\s*복|run(?!way)|interval|work|lap/i.test(line)) kind='work';
+    else if(/(?:^|\s)(?:러닝|인터벌|반복)(?:\s|$)|interval|work/i.test(line)) kind='work';
     if(!kind) continue;
     // 시간형 토큰(m:ss[.d]) 모두 추출 → 첫 토큰=구간시간, 마지막=페이스
     const times = [...line.matchAll(/(\d{1,2})\s*:\s*(\d{2})(?:\.\d)?/g)];
@@ -1392,7 +1503,7 @@ function mergeImageGroup(group){
     hrZones: firstOf('hrZones'),
     ascentM: firstOf('ascentM'), descentM: firstOf('descentM'),
     elevMaxM: firstOf('elevMaxM'), elevMinM: firstOf('elevMinM'),
-    vo2max: firstOf('vo2max'), gradeDist: firstOf('gradeDist'),
+    vo2max: firstOf('vo2max'), gradeDist: firstOf('gradeDist'), avgSpeedKmh: firstOf('avgSpeedKmh'),
     type: classifyRun({distanceKm, durationSec, avgPaceSec, avgHr, phases, hint:(primary.text||'')+' '+(primary.fileName||'')}),
     needsReview: !distanceKm, imageCount: group.length,
     ocrText: group.map(g=>g.text||'').filter(Boolean).join('\n---\n').slice(0,8000) };
@@ -1575,31 +1686,32 @@ async function buildImageItem(dataUrl, fileName, mtime, ocrReady){
   let text = '';
   if(ocrReady!==false){ try{ text = await ocrImage(dataUrl); }catch(e){} }
   const p = parseTextMetrics(text||fileName||'');
-  // 인터벌/NSM 단계 화면 우선 판별 (워밍업/러닝/회복/쿨다운 라벨)
   const phases = parseIntervalPhases(text||'');
   const isPhase = isPhaseWorkout(phases);
   const splits = isPhase ? [] : parseSplits(text||'');
-  // 스플릿 '전용': 구간표 2행↑ + h:mm:ss 없음 + 요약 신호 약함 (긴 Zepp 요약+구간은 요약으로)
-  const hasHMS = /\d{1,2}:\d{2}:\d{2}/.test(text||'');
-  const hasSummarySignal = (p.distanceKm!=null && p.distanceKm>1.6
-    && (p.durationSec!=null || p.avgPaceSec!=null || p.calories!=null || p.avgHr!=null || p.cadence!=null
-        || /심박|케이던스|칼로리|페이스|고도|경사|훈련\s*효과|보폭/i.test(text||'')));
-  const isSplit = !isPhase && splits.length>=2 && !hasHMS && !hasSummarySignal;
-  if(isPhase){
+  const hasSummarySignal = !!(p.distanceKm || p.durationSec || p.avgHr || p.cadence || p.calories
+    || /심박|케이던스|칼로리|페이스|고도|경사|보폭/i.test(text||''));
+  const isSplit = !isPhase && splits.length>=2 && !hasSummarySignal;
+  if(isPhase && !hasSummarySignal){
     const tot = phasesTotals(phases);
     if(tot.distanceKm!=null) p.distanceKm = tot.distanceKm;
     if(tot.durationSec) p.durationSec = tot.durationSec;
     if(!p.avgPaceSec && tot.avgPaceSec) p.avgPaceSec = tot.avgPaceSec;
   } else if(splits.length>=2){
     const tot = splitsTotals(splits);
-    if(p.distanceKm==null) p.distanceKm = tot.distanceKm;
-    if(p.durationSec==null) p.durationSec = tot.durationSec;
+    // 요약 거리가 있으면 절대 구간 합으로 덮지 않음 (1.11km가 5.00km 되는 원인)
+    if(p.distanceKm==null && tot.distanceKm && !(p.avgPaceSec && tot.distanceKm>3 && (tot.durationSec||0)<15*60)){
+      p.distanceKm = tot.distanceKm;
+    }
+    if(p.durationSec==null && tot.durationSec && tot.durationSec>=p.distanceKm*150) p.durationSec = tot.durationSec;
     if(p.avgPaceSec==null) p.avgPaceSec = tot.avgPaceSec;
     if(p.avgHr==null) p.avgHr = tot.avgHr;
     if(p.cadence==null) p.cadence = tot.cadence;
-  } else if(!hasHMS && /스\s*플\s*릿|킬로\s*미터|split/i.test(text||'') && p.distanceKm!=null && p.distanceKm<=1.6){
-    p.distanceKm = null; // 파싱 실패한 스플릿 화면의 '1.00킬로미터' 라벨 오인 방지
+  } else if(p.distanceKm!=null && p.distanceKm===1 && !p.durationSec && !p.avgHr && !p.cadence
+      && /스\s*플\s*릿|split/i.test(text||'')){
+    p.distanceKm = null;
   }
+  reconcileRunMetrics(p);
   return { dataUrl, fileName:fileName||'', text, p, iso:parseDateFromText(text||''),
            splits: (!isPhase && splits.length>=2) ? splits : null,
            phases: isPhase ? phases : null, isSplit, mtime: mtime||null };
@@ -1858,7 +1970,7 @@ function openRecordReport(id){
   let core = kv('거리', dist!=null?`${dist.toFixed(2)} km`:'-')
     + kv('시간', dur?fmtDuration(dur):'-')
     + kv('평균 페이스', pace?`${fmtPace(pace)}/km`:'-')
-    + kv('평균 속도', speedKmh?`${speedKmh.toFixed(1)} km/h`:'-')
+    + kv('평균 속도', (r.avgSpeedKmh||speedKmh)?`${(r.avgSpeedKmh||speedKmh).toFixed(1)} km/h`:'-')
     + kv('평균 심박', hr?`♥ ${hr} bpm`:'-')
     + (r.hrMax? kv('최고 심박', `♥ ${r.hrMax} bpm`) : '')
     + kv('케이던스', cad?`${cad} spm`:'-')
