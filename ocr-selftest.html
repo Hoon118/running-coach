@@ -8,7 +8,7 @@ body{font-family:sans-serif;background:#111;color:#eee;padding:16px}
 <h2>OCR 파서 셀프테스트</h2>
 <div id="out">로딩…</div>
 <script>window.RC_TEST = true;</script>
-<script src="app.js?v=35"></script>
+<script src="app.js?v=36"></script>
 <script>
 const cases = [
   {
@@ -168,6 +168,63 @@ O6:11
 104
 114`,
     expect: { distanceKm: 1.11, durationSec: [360, 400], calories: 95, avgHr: 144, hrMax: 157, cadence: 188, cadMax: 201, strideCm: 104 }
+  },
+  {
+    name: 'Amazfit 상세: 05:46.05를 5.46km로 읽으면 안 됨',
+    text: `8월 19일 17:44
+야외 달리기
+1.11 km
+05:46.05
+05'12"
+166 bpm
+79 kcal
+174 rpm
+페이스
+05'12"  04'50"
+심박수
+166 bpm  174 bpm
+케이던스
+174 rpm  181 rpm
+보폭
+110 cm  116 cm
+지면 접촉 시간
+265 ms  233 ms
+수직 진동
+7.9 cm  8.6 cm
+파워 333 W
+최고 파워 389 W
+상승 0 m
+평지 89%
+오르막 10%
+내리막 1%
+최고강도 50% 02:57
+유산소한계 34% 02:01
+집중유산소 6% 00:33
+지방연소 2% 00:13
+워밍업 2% 00:10
+트레이닝 효과 유산소 2.0
+무산소 0.1
+VO2 Max 55
+구간별 상세정보
+1.00 km 05'12" 174
+0.11 km 05'09" 176`,
+    expect: {
+      distanceKm: 1.11, durationSec: [340, 360], avgHr: 166, hrMax: 174,
+      cadence: 174, calories: 79, strideCm: 110, gctMs: 265, avgPowerW: 333, vo2max: 55
+    },
+    splits: 2,
+    grade: { flat: 89, up: 10, down: 1 },
+    zones: ['peak', 'high', 'mid', 'focus', 'warmup']
+  },
+  {
+    name: 'OCR이 시간을 5.46으로 깨뜨려도 거리가 되면 안 됨',
+    text: `1.11 km
+05.46.05
+05'12"
+166 bpm
+79 kcal
+174 rpm`,
+    expect: { distanceKm: 1.11, durationSec: [340, 360], avgHr: 166, cadence: 174, calories: 79 }
   }
 ];
 
@@ -187,6 +244,15 @@ const wordCases = [
       { t:'km', x:170, y:40, x1:220, y1:70 }
     ],
     expect: { avgHr:139, hrMax:153, cadence:182, cadMax:192, distanceKm:1.11 }
+  },
+  {
+    name: '좌표 파싱: 05.46.05는 거리가 아님',
+    words: [
+      { t:'1.11', x:40, y:20, x1:180, y1:90 },
+      { t:'km', x:190, y:40, x1:240, y1:70 },
+      { t:'05.46.05', x:40, y:120, x1:200, y1:160 }
+    ],
+    expect: { distanceKm: 1.11 }
   }
 ];
 
