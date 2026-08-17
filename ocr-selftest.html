@@ -1,0 +1,217 @@
+<!DOCTYPE html>
+<html lang="ko"><head><meta charset="UTF-8"><title>OCR 파서 셀프테스트</title>
+<style>
+body{font-family:sans-serif;background:#111;color:#eee;padding:16px}
+.ok{color:#39d98a}.bad{color:#ff5d6c} pre{white-space:pre-wrap;font-size:12px}
+</style></head>
+<body>
+<h2>OCR 파서 셀프테스트</h2>
+<div id="out">로딩…</div>
+<script>window.RC_TEST = true;</script>
+<script src="app.js?v=34"></script>
+<script>
+const cases = [
+  {
+    name: '삼성헬스 1.11km (시계 17:49 포함)',
+    text: `8월 15일 17:49
+야외 달리기
+1.11 km
+06:11
+95 kcal
+5'34" /km
+심박수
+139 bpm  153 bpm
+케이던스
+182 spm  192 spm
+페이스
+05'33"  04'50"
+고도
+상승 1 m 하강 1 m
+경사도 분포
+평지 99%
+오르막 0%
+내리막 0%
+보폭
+103 cm  113 cm
+지면 접촉 시간
+177 ms  196 ms
+비행시간
+110 ms  116 ms
+수직진폭
+7.6 cm  8.6 cm
+구간별 기록
+1.00 km 05'32"
+0.11 km 05'49"
+습도 68%`,
+    expect: {
+      distanceKm: 1.11, durationSec: [360, 400], avgHr: 139, hrMax: 153,
+      cadence: 182, cadMax: 192, calories: 95, strideCm: 103, gctMs: 177,
+      flightMs: 110, flightMaxMs: 116, vertOscCm: 7.6, ascentM: 1, descentM: 1
+    },
+    splits: 2,
+    grade: { flat: 99 }
+  },
+  {
+    name: '삼성헬스 OCR 깨짐 + 페이스를 km로 오인하면 안 됨',
+    text: `3월 1일
+1.11 km
+05:27
+139 kcal
+4'54" /km
+166 bpm
+172 bpm
+케이던스 191 spm
+최고 케이던스 202
+05'10" /km
+05'12" /km
+5.00 km 예측`,
+    expect: { distanceKm: 1.11, durationSec: [320, 340], avgHr: 166, cadence: 191, calories: 139 }
+  },
+  {
+    name: 'Zepp 8.15km 요약',
+    text: `거리 8.15 km
+운동 시간 41:40
+평균 페이스 5'06" /km
+최고 페이스 4'21"
+심박수 168
+최고 심박 184
+케이던스 164
+최고 케이던스 178
+606 kcal
+보폭 119 cm
+최고 보폭 132 cm
+지면 접촉 시간 251 ms
+수직 진폭 8.8 cm
+상승 72 m
+하강 69 m
+평지 70%
+오르막 18%
+내리막 12%
+1 5'08" 5'08" 162 163
+2 5'13" 5'13" 165 162
+3 5'08" 5'08" 168 163`,
+    expect: {
+      distanceKm: 8.15, durationSec: 2500, avgHr: 168, hrMax: 184,
+      cadence: 164, calories: 606, strideCm: 119, gctMs: 251, ascentM: 72
+    },
+    splits: 3
+  },
+  {
+    name: 'Amazfit 공유카드 (페이스만 있고 운동시간 없음)',
+    text: `야외 달리기
+hs Jung
+8월 15일 17:49
+Amazfit Active 3 Premium
+1.11 km
+05'48"  05'10"  05'12"
+29°C 68%`,
+    expect: { distanceKm: 1.11, durationSec: [370, 400], avgPaceSec: 348, avgHr: null, calories: null }
+  },
+  {
+    name: 'OCR 깨짐 kn/kca1/O6:11/습도',
+    text: `8월 15일 17:49
+1.l1 kn
+O6:11
+95 kca1
+5 34 /km
+심박수 139 bpm
+케이던스 182 spm
+습도 68%`,
+    expect: { distanceKm: 1.11, durationSec: [360, 400], calories: 95, avgHr: 139, cadence: 182 }
+  },
+  {
+    name: 'Zepp 경사 5구간 + 심박존',
+    text: `거리 10.20 km
+운동 시간 52:10
+평균 페이스 5'07" /km
+심박수 161
+케이던스 170
+급경사 오르막 4%
+오르막 16%
+평지 62%
+내리막 14%
+급경사 내리막 4%
+최고 강도 0:12 0%
+고강도 8:40 17%
+중강도 31:20 60%
+저강도 10:20 20%
+워밍업 1:38 3%`,
+    expect: { distanceKm: 10.2, durationSec: 3130, avgHr: 161, cadence: 170 },
+    grade: { steepUp: 4, up: 16, flat: 62, down: 14, steepDown: 4 },
+    zones: ['high', 'mid', 'focus', 'warmup']
+  },
+  {
+    name: '인터벌 단계 화면',
+    text: `워밍업 16:04.7 3.00 5:22
+1 러닝 3:00.0 0.61 4:57
+체력 회복 1:00.0 0.18 5:36
+2 러닝 3:00.0 0.60 5:00
+체력 회복 1:00.0 0.17 5:40
+쿨다운 10:00.0 1.70 5:53`,
+    phases: 6
+  },
+  {
+    name: '줄바꿈 라벨 카드 (숫자 다음 줄)',
+    text: `야외 달리기
+1.11
+킬로미터
+06:11
+칼로리 95
+페이스 5'34" /km
+심박수
+144
+157
+케이던스
+188
+201
+보폭
+104
+114`,
+    expect: { distanceKm: 1.11, durationSec: [360, 400], calories: 95, avgHr: 144, hrMax: 157, cadence: 188, cadMax: 201, strideCm: 104 }
+  }
+];
+
+function near(v, exp){
+  if(Array.isArray(exp)) return v>=exp[0] && v<=exp[1];
+  if(exp==null) return v==null;
+  if(typeof exp==='number') return Math.abs(v-exp)<0.051;
+  return v===exp;
+}
+
+const lines = [];
+let fail = 0, pass = 0;
+for(const c of cases){
+  const p = parseTextMetrics(c.text || '');
+  const sp = parseSplits(c.text || '');
+  const gd = parseGradeDist(c.text || '');
+  const ph = parseIntervalPhases(c.text || '');
+  const miss = [];
+  Object.keys(c.expect || {}).forEach(k=>{
+    if(!near(p[k], c.expect[k])) miss.push(`${k}=${p[k]} (원함 ${c.expect[k]})`);
+  });
+  if(c.name.includes('1.11') && p.distanceKm>=3) miss.push('거리가 3km 이상으로 부풀음');
+  if(c.name.includes('17:49') && p.durationSec && p.durationSec>800) miss.push('17:49를 운동시간으로 읽음');
+  if(c.splits!=null && sp.length!==c.splits) miss.push(`구간 ${sp.length} (원함 ${c.splits})`);
+  if(c.grade){
+    Object.keys(c.grade).forEach(k=>{
+      const got = gd && gd[k] && gd[k].pct;
+      if(!near(got, c.grade[k])) miss.push(`경사 ${k}=${got} (원함 ${c.grade[k]})`);
+    });
+  }
+  if(c.zones){
+    c.zones.forEach(k=>{
+      if(!p.hrZones || !p.hrZones[k]) miss.push(`심박존 ${k} 없음`);
+    });
+  }
+  if(c.phases!=null && ph.length!==c.phases) miss.push(`단계 ${ph.length} (원함 ${c.phases})`);
+  const ok = !miss.length;
+  if(ok) pass++; else fail++;
+  lines.push(`<div class="${ok?'ok':'bad'}"><b>${ok?'PASS':'FAIL'} ${c.name}</b><br>${
+    ok? `거리 ${p.distanceKm} · ${p.durationSec}s · ♥${p.avgHr}/${p.hrMax||'-'} · ${p.cadence}spm · ${p.calories}kcal · 구간 ${sp.length} · 단계 ${ph.length} · 경사 ${gd?JSON.stringify(gd):'-'}`
+      : miss.join(' · ')
+  }<pre>${JSON.stringify({distanceKm:p.distanceKm,durationSec:p.durationSec,avgPaceSec:p.avgPaceSec,bestPaceSec:p.bestPaceSec,avgHr:p.avgHr,hrMax:p.hrMax,cadence:p.cadence,cadMax:p.cadMax,calories:p.calories,strideCm:p.strideCm,gctMs:p.gctMs,flightMs:p.flightMs,flightMaxMs:p.flightMaxMs,vertOscCm:p.vertOscCm,ascentM:p.ascentM,descentM:p.descentM,gradeDist:p.gradeDist,hrZones:p.hrZones,splits:sp.length,phases:ph.length},null,0)}</pre></div>`);
+}
+document.getElementById('out').innerHTML = `<p>${pass} 통과 / ${fail} 실패</p>`+lines.join('');
+window.__OCR_TEST = { pass, fail, total: cases.length };
+</script>
+</body></html>

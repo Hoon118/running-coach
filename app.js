@@ -6,7 +6,7 @@
 'use strict';
 
 /* 앱 버전 (sw.js 캐시 버전과 동일하게 유지) */
-const APP_VERSION = 'v33';
+const APP_VERSION = 'v34';
 
 /* ---------- 세션 타입 정의 ---------- */
 const TYPES = {
@@ -343,10 +343,17 @@ function classifyRun({distanceKm, avgPaceSec, avgHr, durationSec, hint, phases})
 /* OCR 원문 정규화: Zepp/애플 흔한 오인식 보정 */
 function normalizeOcrText(text){
   let t = String(text||'').replace(/\u00A0/g,' ');
-  t = t.replace(/[ⅠIl|]/g,'1');
+  t = t.replace(/(\d)[ⅠIl|](\d)/g,'$11$2').replace(/(\d)[ⅠIl|]/g,'$11').replace(/[ⅠIl|](\d)/g,'1$1');
   // bpm/spm 변형
   t = t.replace(/b\s*[pP]\s*[nmNM]/gi,'bpm').replace(/s\s*[pP]\s*[nmNM]/gi,'spm');
   t = t.replace(/BPH|bprn|bpn|bpmn/gi,'bpm').replace(/SPN|sprn|spn|spnn/gi,'spm');
+  // km / kcal OCR 깨짐 (kn, kca1, kcaI)
+  t = t.replace(/(\d)\s*k\s*[nr](?!\s*m)/gi,'$1 km');
+  t = t.replace(/k\s*ca[l1I|]/gi,'kcal');
+  t = t.replace(/\b[oO](\d)\s*:\s*(\d{2})\b/g,'0$1:$2');
+  t = t.replace(/(\d{1,2})\s+['’‘`´′]\s+(\d{2})/g,"$1'$2");
+  t = t.replace(/(\d{1,2})\s*[°º]\s*(\d{2})/g,"$1'$2");
+  t = t.replace(/(\d)\s*ㅁ/g,'$1 m');
   // 한글 라벨 깨짐
   t = t.replace(/심\s*박\s*수?/g,'심박수').replace(/케\s*이\s*던\s*스|캐이던스|케이던쓰/g,'케이던스');
   t = t.replace(/평\s*균/g,'평균').replace(/최\s*고/g,'최고').replace(/최\s*저/g,'최저');
@@ -358,6 +365,7 @@ function normalizeOcrText(text){
   t = t.replace(/보\s*폭/g,'보폭').replace(/분\s*포/g,'분포');
   t = t.replace(/수직\s*진\s*동/g,'수직진폭').replace(/오르막\s*합계/g,'상승').replace(/내리막\s*합계/g,'하강');
   t = t.replace(/공\s*중\s*체\s*류\s*시\s*간/g,'비행시간').replace(/웜\s*업/g,'워밍업');
+  t = t.replace(/카\s*로\s*리|칼\s*로\s*리/g,'칼로리');
   return t;
 }
 /* 라벨 근처 숫자 추출 (같은 줄·다음 줄·숫자 뒤 라벨) */
@@ -393,7 +401,13 @@ function pickLabeledPair(text, labelRe, min, max, asFloat){
   };
   for(let i=0;i<lines.length;i++){
     if(!labelRe.test(lines[i])) continue;
-    const blob = [lines[i], lines[i+1]||'', lines[i+2]||'', lines[i+3]||''].join(' ');
+    const chunk = [];
+    for(let j=0;j<=3 && i+j<lines.length;j++){
+      const ln = lines[i+j];
+      if(j>0 && /케이던스|심박|페이스|보폭|칼로리|지면|비행|수직|고도|경사|거리|운동\s*시간/i.test(ln) && !labelRe.test(ln)) break;
+      chunk.push(ln);
+    }
+    const blob = chunk.join(' ');
     const re = asFloat
       ? /(\d{1,3}(?:[.,]\d+)?)/g
       : /(\d{2,3})(?!\d)/g;
@@ -420,7 +434,7 @@ function parseDistanceKm(t){
     if(v>0.05 && v<300) return v;
   }
   const cands = [];
-  const re = /(\d{1,3}(?:[.,]\d{1,2}))\s*(?:k\s*m|킬로)/gi;
+  const re = /(\d{1,3}(?:[.,]\d{1,2}))\s*(?:k\s*m|킬로|k\s*[nr])/gi;
   let mm;
   while((mm = re.exec(t))){
     const v = parseFloat(mm[1].replace(',','.'));
@@ -431,6 +445,17 @@ function parseDistanceKm(t){
     if(/['’‘`´′:]\s*\d{2}/.test(ctx) || /\/\s*k\s*m/i.test(ctx)) continue;
     if(/페이스|최고|베스트|예측|목표|5\s*k\b|10\s*k/i.test(ctx) && v>=3.5 && v<=12) continue;
     cands.push(v);
+  }
+  if(!cands.length){
+    const lines = t.split(/[\n\r]+/);
+    for(let i=0;i<lines.length;i++){
+      const blob = ((lines[i-1]||'')+' '+lines[i]+' '+(lines[i+1]||''));
+      if(!/킬로미터|\bkm\b|거리/i.test(blob)) continue;
+      const bm = lines[i].trim().match(/^(\d{1,2}[.,]\d{2})\s*(?:k\s*m|킬로)?$/i);
+      if(!bm) continue;
+      const v = parseFloat(bm[1].replace(',','.'));
+      if(v>0.05 && v<40) cands.push(v);
+    }
   }
   if(!cands.length) return null;
   // 1.00 같은 정수 km(구간)보다 1.11 같은 총거리를 우선
@@ -452,29 +477,65 @@ function plausibleRunPace(secPerKm){
 function parseWorkoutHeader(t){
   const out = {};
   const head = String(t||'').slice(0, 1100);
-  const distM = head.match(/(\d{1,2}[.,]\d{2})\s*(?:k\s*m|킬로)/i);
-  if(distM){
-    const v = parseFloat(distM[1].replace(',','.'));
-    if(v>0.05 && v<40) out.distanceKm = v;
-  }
-  const calM = head.match(/(\d{2,4})\s*k\s*cal/i);
+  const distAll = [...head.matchAll(/(\d{1,2}[.,]\d{2})\s*(?:k\s*m|킬로)/gi)]
+    .map(x=>({ v:parseFloat(x[1].replace(',','.')), index:x.index, raw:x[0] }))
+    .filter(x=> x.v>0.05 && x.v<40 && !/['’]/.test(head.slice(Math.max(0,x.index-8), x.index)));
+  const distM = distAll.find(x=> Math.abs(x.v-Math.round(x.v))>0.02) || distAll[0];
+  if(distM) out.distanceKm = distM.v;
+  const calM = head.match(/(\d{2,4})\s*k\s*ca[l1]/i);
   if(calM) out.calories = +calM[1];
-  const paceM = head.match(/(\d{1,2})\s*['’‘`´′:]\s*(\d{2})\s*["”“''′″]?\s*\/\s*k\s*m/i);
+  const paceM = head.match(/(\d{1,2})\s*['’‘`´′:]\s*(\d{2})\s*["”“''′″]?\s*\/\s*k\s*m/i)
+    || head.match(/(\d{1,2})\s+(\d{2})\s*["”“''′″]?\s*\/\s*k\s*m/i);
   if(paceM){ const s=parsePaceToken(paceM[1], paceM[2]); if(s) out.avgPaceSec=s; }
   const hrM = head.match(/(\d{2,3})\s*bpm/i);
   if(hrM){ const v=+hrM[1]; if(v>=90 && v<=220) out.avgHr=v; }
   const cadM = head.match(/(\d{2,3})\s*spm/i);
   if(cadM){ const v=+cadM[1]; if(v>=120 && v<=260) out.cadence=v; }
-  const searchFrom = distM ? distM.index + distM[0].length : 0;
-  const window = head.slice(searchFrom, searchFrom+160);
-  for(const tm of window.matchAll(/(\d{1,2})\s*:\s*(\d{2})(?!\s*:\s*\d)/g)){
-    const absIdx = searchFrom + tm.index;
-    if(isClockContext(head, absIdx)) continue;
-    const s = (+tm[1])*60 + (+tm[2]);
-    if(s<25 || s>8*3600) continue;
-    if(out.distanceKm && !plausibleRunPace(s/out.distanceKm)) continue;
-    out.durationSec = s;
-    break;
+  const searchFrom = distM ? distM.index + distM.raw.length : 0;
+  const window = head.slice(searchFrom, searchFrom+280);
+  const hms = window.match(/(\d{1,2})\s*:\s*(\d{2})\s*:\s*(\d{2})/);
+  if(hms && !isClockContext(head, searchFrom + hms.index)){
+    const s = (+hms[1])*3600 + (+hms[2])*60 + (+hms[3]);
+    if(s>=20 && s<=12*3600) out.durationSec = s;
+  }
+  if(out.durationSec==null){
+    for(const tm of window.matchAll(/(\d{1,2})\s*:\s*(\d{2})(?!\s*:\s*\d)/g)){
+      const absIdx = searchFrom + tm.index;
+      if(isClockContext(head, absIdx)) continue;
+      const prev = head.slice(Math.max(0, absIdx-3), absIdx);
+      if(/\d\s*:?\s*$/.test(prev) && /:\s*$/.test(prev)) continue;
+      const s = (+tm[1])*60 + (+tm[2]);
+      if(s<25 || s>8*3600) continue;
+      if(out.distanceKm && !plausibleRunPace(s/out.distanceKm)) continue;
+      out.durationSec = s;
+      break;
+    }
+  }
+  if(out.durationSec==null){
+    const kd = head.match(/(\d{1,2})\s*분\s*(\d{1,2})\s*초/);
+    if(kd){
+      const s=(+kd[1])*60+(+kd[2]);
+      if(!out.distanceKm || plausibleRunPace(s/out.distanceKm)) out.durationSec=s;
+    }
+  }
+  if(out.avgPaceSec==null){
+    const p2 = head.match(/페이스\D{0,16}(\d{1,2})\s*['’‘`´′:]\s*(\d{2})/i);
+    if(p2){ const s=parsePaceToken(p2[1], p2[2]); if(s) out.avgPaceSec=s; }
+  }
+  if(out.avgPaceSec==null && out.distanceKm){
+    const from = distM ? distM.index + distM.raw.length : 0;
+    const window2 = head.slice(from, from+360);
+    const orphan = [];
+    for(const pm of window2.matchAll(/(\d{1,2})\s*['’‘`´′:]\s*(\d{2})/g)){
+      const absIdx = from + pm.index;
+      if(isClockContext(head, absIdx)) continue;
+      const s = parsePaceToken(pm[1], pm[2]);
+      if(s && plausibleRunPace(s)) orphan.push(s);
+    }
+    if(orphan.length){
+      out.avgPaceSec = orphan[0];
+      if(orphan.length>=2) out.bestPaceSec = Math.min(...orphan);
+    }
   }
   if(out.distanceKm && out.avgPaceSec && !out.durationSec){
     out.durationSec = Math.round(out.distanceKm * out.avgPaceSec);
@@ -493,6 +554,8 @@ function parseDurationSec(t){
   if(hh && mn) return (+hh[1])*3600+(+mn[1])*60+(ss?+ss[1]:0);
   m = t.match(/(?:운동\s*시간|총\s*시간|소요\s*시간|duration)\D{0,12}(\d{1,2})\s*:\s*(\d{2})(?!\s*:\s*\d)/i);
   if(m){ const s=(+m[1])*60+(+m[2]); if(s>=20&&s<=5*3600) return s; }
+  m = t.match(/(?:운동\s*시간|총\s*시간|소요\s*시간)\D{0,12}(\d{1,2})\s*분\s*(\d{1,2})\s*초/i);
+  if(m) return (+m[1])*60+(+m[2]);
   return null;
 }
 function reconcileRunMetrics(out){
@@ -550,12 +613,16 @@ function parseGradeDist(text){
   // 급경사 먼저 (일반 오르막/내리막과 구분)
   take('steepUp', /급\s*경사\s*오르막[^%\d]{0,24}(\d{1,3}(?:[.,]\d+)?)\s*%/i);
   take('steepDown', /급\s*경사\s*내리막[^%\d]{0,24}(\d{1,3}(?:[.,]\d+)?)\s*%/i);
-  // 일반 오르막/내리막: '급경사'가 붙지 않은 경우만
-  for(const mm of t.matchAll(/(^|[^급])\s*오르막[^%\d]{0,24}(\d{1,3}(?:[.,]\d+)?)\s*%/gi)){
-    if(out.up==null){ const pct=parseFloat(String(mm[2]).replace(',','.')); if(pct>=0&&pct<=100) out.up={pct}; }
+  // 일반 오르막/내리막: '급경사 오르막/내리막'은 제외
+  for(const mm of t.matchAll(/오르막[^%\d]{0,24}(\d{1,3}(?:[.,]\d+)?)\s*%/gi)){
+    const before = t.slice(Math.max(0, mm.index-10), mm.index);
+    if(/급\s*경사\s*$/.test(before)) continue;
+    if(out.up==null){ const pct=parseFloat(String(mm[1]).replace(',','.')); if(pct>=0&&pct<=100) out.up={pct}; }
   }
-  for(const mm of t.matchAll(/(^|[^급])\s*내리막[^%\d]{0,24}(\d{1,3}(?:[.,]\d+)?)\s*%/gi)){
-    if(out.down==null){ const pct=parseFloat(String(mm[2]).replace(',','.')); if(pct>=0&&pct<=100) out.down={pct}; }
+  for(const mm of t.matchAll(/내리막[^%\d]{0,24}(\d{1,3}(?:[.,]\d+)?)\s*%/gi)){
+    const before = t.slice(Math.max(0, mm.index-10), mm.index);
+    if(/급\s*경사\s*$/.test(before)) continue;
+    if(out.down==null){ const pct=parseFloat(String(mm[1]).replace(',','.')); if(pct>=0&&pct<=100) out.down={pct}; }
   }
   take('flat', /평지[^%\d]{0,24}(\d{1,3}(?:[.,]\d+)?)\s*%/i);
   // 영문/퍼센트 구간 표기
@@ -591,6 +658,8 @@ function parseGradeDist(text){
       if(out[key]!=null) return;
       for(let i=0;i<lines.length;i++){
         if(!re.test(lines[i])) continue;
+        if((key==='up' && /급\s*경사\s*오르막/.test(lines[i])) ||
+           (key==='down' && /급\s*경사\s*내리막/.test(lines[i]))) continue;
         const blob = lines[i]+' '+(lines[i+1]||'')+' '+(lines[i+2]||'');
         const pm = blob.match(/(\d{1,3}(?:[.,]\d+)?)\s*%/);
         if(!pm) continue;
@@ -621,10 +690,14 @@ function parseTextMetrics(text){
   const dist = parseDistanceKm(t);
   if(dist && (out.distanceKm==null || (dist<3.2 && out.distanceKm>=3.2))) out.distanceKm = dist;
   const dur = parseDurationSec(t);
-  if(dur && out.durationSec==null) out.durationSec = dur;
+  if(dur){
+    const explicit = /운동\s*시간|총\s*시간|소요\s*시간|duration/i.test(t) || /\d{1,2}\s*:\s*\d{2}\s*:\s*\d{2}/.test(t);
+    if(out.durationSec==null || explicit) out.durationSec = dur;
+  }
   // 페이스: 라벨 우선 → /km → 카드 평균·최고
   let m = t.match(/(?:평균\s*)?페이스\D{0,12}(\d{1,2})\s*['’‘`´′:]\s*(\d{2})/i)
-    || t.match(/(\d{1,2})\s*['’‘`´′:]\s*(\d{2})\s*["”“''′″]?\s*\/\s*k\s*m/i);
+    || t.match(/(\d{1,2})\s*['’‘`´′:]\s*(\d{2})\s*["”“''′″]?\s*\/\s*k\s*m/i)
+    || t.match(/(\d{1,2})\s+(\d{2})\s*["”“''′″]?\s*\/\s*k\s*m/i);
   if(m){ const s=parsePaceToken(m[1], m[2]); if(s) out.avgPaceSec=s; }
   m = t.match(/(?:최고|베스트|best)\s*페이스\D{0,12}(\d{1,2})\s*['’‘`´′:]\s*(\d{2})/i);
   if(m){ const s=parsePaceToken(m[1], m[2]); if(s) out.bestPaceSec=s; }
@@ -670,7 +743,7 @@ function parseTextMetrics(text){
     || t.match(/(\d{1,2}(?:[.,]\d+)?)\s*k\s*m\s*\/\s*h/i);
   if(m){ const v=parseFloat(m[1].replace(',','.')); if(v>=3&&v<=30) out.avgSpeedKmh=v; }
   // 칼로리
-  m = t.match(/(\d{2,4})\s*k\s*cal/i) || t.match(/(?:칼로리|열량)\D{0,8}(\d{2,4})/i);
+  m = t.match(/(\d{2,4})\s*k\s*ca[l1]/i) || t.match(/(?:칼로리|열량)\D{0,8}(\d{2,4})/i);
   if(m) out.calories = +m[1];
   // 지면 접촉 시간 (ms) · 최고
   m = t.match(/지면\s*접촉\s*시간\D{0,24}(\d{2,4})\s*m\s*s/i)
@@ -693,6 +766,13 @@ function parseTextMetrics(text){
   if(m){ const v=+m[1]; if(v>=20&&v<=200) out.flightMs=v; }
   m = t.match(/최고\s*비행\s*시간\D{0,16}(\d{2,3})\s*m\s*s/i);
   if(m){ const v=+m[1]; if(v>=20&&v<=200) out.flightMaxMs=v; }
+  if(out.flightMs==null || out.flightMaxMs==null){
+    const fp = pickLabeledPair(t, /비행\s*시간|flight\s*time/i, 20, 200, false);
+    if(fp){
+      if(out.flightMs==null) out.flightMs=fp.avg;
+      if(out.flightMaxMs==null && fp.extra!=null) out.flightMaxMs=Math.max(fp.avg, fp.extra);
+    }
+  }
   // 보폭 (cm) — 삼성헬스 평균/최고 쌍
   const stPair = pickLabeledPair(t, /보폭|stride/i, 40, 200, false);
   if(stPair){ out.strideCm=stPair.avg; if(stPair.extra!=null) out.strideMaxCm=Math.max(stPair.avg, stPair.extra); }
@@ -739,7 +819,8 @@ function parseTextMetrics(text){
   m = t.match(/수직\s*비\D{0,16}(\d{1,2}(?:[.,]\d+)?)\s*%/i);
   if(m) out.vertRatioPct = parseFloat(m[1].replace(',','.'));
   // 훈련 효과
-  m = t.match(/유산소\D{0,12}(\d{1,2}(?:[.,]\d+)?)/);
+  m = t.match(/(?:훈련\s*효과|TE)\D{0,20}유산소\D{0,8}(\d{1,2}(?:[.,]\d+)?)/i)
+    || t.match(/유산소\s*(?:TE|효과)\D{0,8}(\d{1,2}(?:[.,]\d+)?)/i);
   if(m){ const v=parseFloat(m[1].replace(',','.')); if(v>=0&&v<=5.5) out.teAerobic=v; }
   m = t.match(/비\s*유산소\D{0,12}(\d{1,2}(?:[.,]\d+)?)|anaerobic\D{0,12}(\d{1,2}(?:[.,]\d+)?)/i);
   if(m){ const v=parseFloat((m[1]||m[2]).replace(',','.')); if(v>=0&&v<=5.5) out.teAnaerobic=v; }
@@ -753,20 +834,21 @@ function parseTextMetrics(text){
     ['warmup', /워\s*밍\s*업|웜\s*업|이완|relax|warm\s*-?\s*up/i]
   ];
   for(const [key, re] of zoneRules){
-    const rm = t.match(new RegExp(re.source + '[^\\d%]{0,40}(\\d{1,2}\\s*:\\s*\\d{2})[^\\d%]{0,16}(\\d{1,3}(?:[.,]\\d+)?)\\s*%','i'))
-      || t.match(new RegExp(re.source + '[^\\d%]{0,40}(\\d{1,3}(?:[.,]\\d+)?)\\s*%[^\\d%]{0,16}(\\d{1,2}\\s*:\\s*\\d{2})','i'));
+    const src = '(?:' + re.source + ')';
+    const rm = t.match(new RegExp(src + '[^\\d%]{0,40}(\\d{1,2}\\s*:\\s*\\d{2})[^\\d%]{0,16}(\\d{1,3}(?:[.,]\\d+)?)\\s*%','i'))
+      || t.match(new RegExp(src + '[^\\d%]{0,40}(\\d{1,3}(?:[.,]\\d+)?)\\s*%[^\\d%]{0,16}(\\d{1,2}\\s*:\\s*\\d{2})','i'));
     if(rm){
       const timeTok = /:/.test(rm[1]) ? rm[1] : rm[2];
       const pctTok = /:/.test(rm[1]) ? rm[2] : rm[1];
       const sec = parseDurToken(timeTok);
       const pct = parseFloat(String(pctTok).replace(',','.'));
-      hrZones[key] = { sec: sec, pct: (pct>=0&&pct<=100)?pct:null };
+      if(sec!=null || (pct>=0&&pct<=100)) hrZones[key] = { sec: sec, pct: (pct>=0&&pct<=100)?pct:null };
     } else {
-      const rm2 = t.match(new RegExp(re.source + '[^\\d%]{0,40}(\\d{1,2}\\s*:\\s*\\d{2})','i'));
+      const rm2 = t.match(new RegExp(src + '[^\\d%]{0,40}(\\d{1,2}\\s*:\\s*\\d{2})','i'));
       if(rm2){ const sec=parseDurToken(rm2[1]); if(sec!=null) hrZones[key]={ sec, pct:null }; }
       else {
-        const rm3 = t.match(new RegExp(re.source + '[^\\d%]{0,40}(\\d{1,3}(?:[.,]\\d+)?)\\s*%','i'));
-        const rm4 = t.match(new RegExp(re.source + '[^\\d]{0,48}(?:(\\d{1,2})\\s*분)?\\s*(?:(\\d{1,2})\\s*초)','i'));
+        const rm3 = t.match(new RegExp(src + '[^\\d%]{0,40}(\\d{1,3}(?:[.,]\\d+)?)\\s*%','i'));
+        const rm4 = t.match(new RegExp(src + '[^\\d]{0,48}(?:(\\d{1,2})\\s*분)?\\s*(?:(\\d{1,2})\\s*초)','i'));
         const pct = rm3 ? parseFloat(rm3[1].replace(',','.')) : null;
         const sec = (rm4 && (rm4[1]||rm4[2])) ? ((rm4[1]?+rm4[1]*60:0)+(rm4[2]?+rm4[2]:0)) : null;
         if(sec!=null || (pct>=0&&pct<=100)) hrZones[key] = { sec, pct: (pct>=0&&pct<=100)?pct:null };
@@ -864,17 +946,27 @@ function parseSplits(text){
   for(const raw of lines){
     const line = raw.trim(); if(!line || rows.length>=80) continue;
     if(/페이스|심박수|케이던스|고도|보폭|수직|지면|파워|칼로리|경사|분포|존|zone/i.test(line) && !/구간\s*(?:별)?\s*기록/.test(line)) continue;
-    // 삼성헬스: 1.00 km  05'37"   /  0.11 km  00'36"  05'29"
-    let sm = line.match(/^(\d{1,2}(?:[.,]\d{1,2})?)\s*(?:k\s*m|킬로)\s+(\d{1,2})\s*['’‘`´′:]\s*(\d{2})(?:\s+(\d{1,2})\s*['’‘`´′:]\s*(\d{2}))?/i);
+    // 삼성헬스: 1.00 km  05'37"   /  0.11 km  00'36"  05'29"  /  0.11 km 05'49"(페이스만)
+    let sm = line.match(/^(\d{1,2}(?:[.,]\d{1,2})?)\s*(?:k\s*m|킬로)\s+(\d{1,2})\s*['’‘`´′:]\s*(\d{2})(?:\s+(\d{1,2})\s*['’‘`´′:]\s*(\d{2}))?(.*)$/i);
     if(sm){
       const kmHint = parseFloat(String(sm[1]).replace(',','.'));
-      const tSec = (+sm[2])*60+(+sm[3]);
-      const pace = sm[4]!=null ? (+sm[4])*60+(+sm[5]) : (kmHint>0 && kmHint<1.01 ? Math.round(tSec/Math.max(kmHint,0.05)) : tSec);
-      pushRow(tSec, pace, null, null, (kmHint>0 && kmHint<=1.5)?kmHint:null);
+      let tSec = (+sm[2])*60+(+sm[3]);
+      let pace = sm[4]!=null ? (+sm[4])*60+(+sm[5]) : (kmHint>0 && kmHint<1.01 ? Math.round(tSec/Math.max(kmHint,0.05)) : tSec);
+      if(kmHint>0 && kmHint<0.95 && sm[4]==null && (tSec>90 || (tSec/Math.max(kmHint,0.05))>720)){
+        pace = tSec;
+        tSec = Math.round(kmHint * pace);
+      }
+      let hr=null, cad=null;
+      const nums = [...String(sm[6]||'').matchAll(/(\d{2,3})(?!\d)/g)].map(x=>+x[1]);
+      for(const n of nums){
+        if(hr==null && n>=70 && n<=230){ hr=n; continue; }
+        if(cad==null && n>=100 && n<=260) cad=n;
+      }
+      pushRow(tSec, pace, hr, cad, (kmHint>0 && kmHint<=1.5)?kmHint:null);
       continue;
     }
     // Zepp 표: 1  5'08"  5'08"  162  163
-    let zm = line.match(/^(\d{1,2}(?:[.,]\d{1,2})?)\s+(?:k\s*m\s+)?(\d{1,2})\s*['’‘`´′:]\s*(\d{2})\s*["”“''′″]?\s+(\d{1,2})\s*['’‘`´′:]\s*(\d{2})\s*["”“''′″]?\s+(\d{2,3})\s*(?:bpm)?\s+(\d{2,3})\s*(?:spm)?\s*$/i);
+    let zm = line.match(/^(\d{1,2}(?:[.,]\d{1,2})?)\s+(?:k\s*m\s+)?(\d{1,2})\s*['’‘`´′:]\s*(\d{2})\s*["”“''′″]?\s+(\d{1,2})\s*['’‘`´′:]\s*(\d{2})\s*["”“''′″]?\s+(\d{2,3})\s*(?:bpm)?\s+(\d{2,3})\s*(?:spm)?/i);
     if(zm){
       const tSec = (+zm[2])*60+(+zm[3]);
       const pace = (+zm[4])*60+(+zm[5]);
@@ -962,17 +1054,17 @@ function splitsTotals(sp){
 }
 
 /* ── 이미지 OCR (Tesseract.js, CDN 지연 로딩) ── */
-let _ocrLoading;
+var _rcOcrLoading = null;
 function ensureOCR(){
   if(window.Tesseract) return Promise.resolve();
-  if(_ocrLoading) return _ocrLoading;
-  _ocrLoading = new Promise((res, rej)=>{
+  if(_rcOcrLoading) return _rcOcrLoading;
+  _rcOcrLoading = new Promise((res, rej)=>{
     const s = document.createElement('script');
     s.src = 'https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js';
     s.onload = ()=>res(); s.onerror = ()=>rej(new Error('OCR 로드 실패'));
     document.head.appendChild(s);
   });
-  return _ocrLoading;
+  return _rcOcrLoading;
 }
 /* OCR 전처리: 그레이스케일 → 어두운 배경 반전 → 대비 강화 → 업스케일
    (애플 피트니스처럼 '검은 배경 + 컬러 숫자'는 그대로면 인식률이 낮음) */
@@ -1564,6 +1656,7 @@ function mergeImageGroup(group){
     hasImage:true, distanceKm, durationSec, avgPaceSec, avgHr, cadence, splits, phases, autoType:true, mtime,
     hrMin, hrMax, cadMin, cadMax, paceFast, paceSlow,
     calories: firstOf('calories'), gctMs: firstOf('gctMs'), gctMaxMs: firstOf('gctMaxMs'),
+    gctMinMs: firstOf('gctMinMs'),
     gctBalanceL: firstOf('gctBalanceL'), gctBalanceR: firstOf('gctBalanceR'),
     flightMs: firstOf('flightMs'), flightMaxMs: firstOf('flightMaxMs'),
     strideCm: firstOf('strideCm'), strideMaxCm: firstOf('strideMaxCm'),
@@ -4254,8 +4347,14 @@ $('#btnSettings').onclick = ()=>{
     <button class="btn primary block" id="set_save">저장</button>
     <div class="note">앱 데이터는 이 기기에만 저장됩니다(IndexedDB). 홈 화면에 추가하면 오프라인에서도 동작해요.</div>
     <div style="text-align:center;font-size:12px;color:var(--mut);margin-top:14px">런코치 · 버전 ${APP_VERSION}</div>
+    <button class="btn block" id="set_update" style="margin-top:8px">🔄 새 버전 확인 · 바로 적용</button>
   `);
   $('#set_shoes').onclick=()=>{ closeSheet(); go('shoes'); };
+  const updBtn = $('#set_update');
+  if(updBtn) updBtn.onclick = async ()=>{
+    toast('최신 버전 확인 · 캐시 갱신 중…');
+    await forceHardRefresh();
+  };
 
   // 가능 요일 체크
   {
@@ -4389,14 +4488,23 @@ async function forceHardRefresh(){
   location.replace(u.toString());
 }
 async function checkRemoteVersion(){
-  try{
-    const res = await fetch('./version.json?t='+Date.now(), { cache:'no-store' });
-    if(!res.ok) return;
-    const j = await res.json();
-    if(j && j.v && j.v !== APP_VERSION){
-      await forceHardRefresh();
-    }
-  }catch(e){}
+  const urls = [
+    './version.json?t='+Date.now(),
+    'https://hoon118.github.io/running-coach/version.json?t='+Date.now()
+  ];
+  for(const url of urls){
+    try{
+      const res = await fetch(url, { cache:'no-store' });
+      if(!res.ok) continue;
+      const j = await res.json();
+      if(j && j.v && j.v !== APP_VERSION){
+        try{ toast('새 버전 '+j.v+' 적용 중…'); }catch(e){}
+        await forceHardRefresh();
+        return;
+      }
+      return;
+    }catch(e){}
+  }
 }
 function setupServiceWorker(){
   if(!('serviceWorker' in navigator)){
@@ -4445,4 +4553,13 @@ function setupServiceWorker(){
 }
 
 window.go = go;
-boot();
+window.parseTextMetrics = parseTextMetrics;
+window.parseSplits = parseSplits;
+window.parseGradeDist = parseGradeDist;
+window.parseIntervalPhases = parseIntervalPhases;
+window.reconcileRunMetrics = reconcileRunMetrics;
+window.parseDistanceKm = parseDistanceKm;
+window.normalizeOcrText = normalizeOcrText;
+window.ocrImage = ocrImage;
+window.ensureOCR = ensureOCR;
+if(!window.RC_TEST) boot();

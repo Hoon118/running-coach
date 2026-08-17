@@ -1,0 +1,187 @@
+<!DOCTYPE html>
+<html lang="ko"><head><meta charset="UTF-8"><title>이미지 OCR 실기 테스트</title>
+<style>
+body{font-family:sans-serif;background:#111;color:#eee;padding:16px;max-width:980px}
+.ok{color:#39d98a}.bad{color:#ff5d6c}
+pre{white-space:pre-wrap;font-size:11px;background:#1a1a1a;padding:8px;border-radius:8px}
+.card{margin:12px 0;padding:12px;border:1px solid #333;border-radius:10px}
+img{max-width:280px;border:1px solid #444;margin:6px 0}
+</style></head>
+<body>
+<h2>이미지 OCR 실기 테스트</h2>
+<p id="st">이미지 생성 · OCR 엔진 로드 중…</p>
+<div id="out"></div>
+<script>window.RC_TEST = true;</script>
+<script src="app.js?v=34img"></script>
+<script>
+function near(v, exp){
+  if(Array.isArray(exp)) return v>=exp[0] && v<=exp[1];
+  if(exp==null) return v==null;
+  if(typeof exp==='number') return Math.abs(v-exp)<0.08;
+  return v===exp;
+}
+function drawCard(w, h, bg, draw){
+  const cv = document.createElement('canvas');
+  cv.width = w; cv.height = h;
+  const ctx = cv.getContext('2d');
+  ctx.fillStyle = bg;
+  ctx.fillRect(0,0,w,h);
+  ctx.textBaseline = 'top';
+  draw(ctx);
+  return cv.toDataURL('image/png');
+}
+function line(ctx, y, size, color, text, x){
+  ctx.fillStyle = color;
+  ctx.font = `700 ${size}px "Malgun Gothic","Apple SD Gothic Neo",sans-serif`;
+  ctx.fillText(text, x||36, y);
+}
+const fixtures = [
+  {
+    name: '삼성헬스 요약 카드',
+    expect: { distanceKm: 1.11, calories: 95, avgHr: 139, cadence: 182 },
+    dataUrl: drawCard(720, 1280, '#0b0f14', (ctx)=>{
+      line(ctx, 40, 28, '#8ea0b6', '8월 15일 17:49');
+      line(ctx, 90, 36, '#e9eef5', '야외 달리기');
+      line(ctx, 170, 72, '#ffffff', '1.11 km');
+      line(ctx, 270, 48, '#e9eef5', '06:11');
+      line(ctx, 340, 36, '#ffb03d', '95 kcal');
+      line(ctx, 400, 36, '#e9eef5', "5'34\" /km");
+      line(ctx, 480, 28, '#8ea0b6', '심박수');
+      line(ctx, 520, 40, '#ff5d6c', '139 bpm   153 bpm');
+      line(ctx, 590, 28, '#8ea0b6', '케이던스');
+      line(ctx, 630, 40, '#39d98a', '182 spm   192 spm');
+      line(ctx, 700, 28, '#8ea0b6', '보폭');
+      line(ctx, 740, 40, '#4aa8ff', '103 cm   113 cm');
+      line(ctx, 810, 28, '#8ea0b6', '지면 접촉 시간');
+      line(ctx, 850, 36, '#e9eef5', '177 ms   196 ms');
+      line(ctx, 920, 28, '#8ea0b6', '비행시간');
+      line(ctx, 960, 36, '#e9eef5', '110 ms   116 ms');
+      line(ctx, 1030, 28, '#8ea0b6', '구간별 기록');
+      line(ctx, 1070, 32, '#e9eef5', "1.00 km  05'32\"");
+      line(ctx, 1120, 32, '#e9eef5', "0.11 km  05'49\"");
+    })
+  },
+  {
+    name: 'Zepp 8.15km',
+    expect: { distanceKm: 8.15, durationSec: 2500, avgHr: 168, cadence: 164, calories: 606 },
+    dataUrl: drawCard(720, 1100, '#111823', (ctx)=>{
+      line(ctx, 40, 32, '#8ea0b6', '거리');
+      line(ctx, 80, 64, '#ffffff', '8.15 km');
+      line(ctx, 170, 28, '#8ea0b6', '운동 시간');
+      line(ctx, 210, 44, '#e9eef5', '41:40');
+      line(ctx, 280, 28, '#8ea0b6', '평균 페이스');
+      line(ctx, 320, 40, '#e9eef5', "5'06\" /km");
+      line(ctx, 390, 36, '#ff5d6c', '심박수 168');
+      line(ctx, 440, 32, '#ff5d6c', '최고 심박 184');
+      line(ctx, 500, 36, '#39d98a', '케이던스 164');
+      line(ctx, 550, 32, '#39d98a', '최고 케이던스 178');
+      line(ctx, 610, 36, '#ffb03d', '606 kcal');
+      line(ctx, 670, 32, '#4aa8ff', '보폭 119 cm');
+      line(ctx, 720, 32, '#e9eef5', '지면 접촉 시간 251 ms');
+      line(ctx, 770, 32, '#e9eef5', '상승 72 m  하강 69 m');
+      line(ctx, 830, 28, '#8ea0b6', '평지 70%  오르막 18%  내리막 12%');
+      line(ctx, 890, 28, '#e9eef5', "1  5'08\"  5'08\"  162  163");
+      line(ctx, 940, 28, '#e9eef5', "2  5'13\"  5'13\"  165  162");
+      line(ctx, 990, 28, '#e9eef5', "3  5'08\"  5'08\"  168  163");
+    })
+  },
+  {
+    name: 'Amazfit 공유카드',
+    expect: { distanceKm: 1.11, durationSec: [370, 400] },
+    dataUrl: drawCard(720, 720, '#151d2a', (ctx)=>{
+      line(ctx, 40, 28, '#8ea0b6', '야외 달리기');
+      line(ctx, 90, 24, '#6b7d94', '8월 15일 17:49');
+      line(ctx, 140, 22, '#6b7d94', 'Amazfit Active 3 Premium');
+      line(ctx, 220, 72, '#ffffff', '1.11 km');
+      line(ctx, 330, 40, '#e9eef5', "05'48\"   05'10\"   05'12\"");
+      line(ctx, 420, 28, '#8ea0b6', '29°C  68%');
+    })
+  },
+  {
+    name: 'Zepp 경사+심박존',
+    expect: { distanceKm: 10.2, avgHr: 161, cadence: 170 },
+    dataUrl: drawCard(720, 1000, '#0b0f14', (ctx)=>{
+      line(ctx, 40, 28, '#8ea0b6', '거리');
+      line(ctx, 80, 56, '#ffffff', '10.20 km');
+      line(ctx, 160, 28, '#8ea0b6', '운동 시간  52:10');
+      line(ctx, 210, 32, '#e9eef5', "평균 페이스  5'07\" /km");
+      line(ctx, 270, 32, '#ff5d6c', '심박수 161');
+      line(ctx, 320, 32, '#39d98a', '케이던스 170');
+      line(ctx, 390, 28, '#8ea0b6', '급경사 오르막 4%');
+      line(ctx, 430, 28, '#8ea0b6', '오르막 16%');
+      line(ctx, 470, 28, '#8ea0b6', '평지 62%');
+      line(ctx, 510, 28, '#8ea0b6', '내리막 14%');
+      line(ctx, 550, 28, '#8ea0b6', '급경사 내리막 4%');
+      line(ctx, 620, 26, '#e9eef5', '고강도 8:40 17%');
+      line(ctx, 660, 26, '#e9eef5', '중강도 31:20 60%');
+      line(ctx, 700, 26, '#e9eef5', '저강도 10:20 20%');
+      line(ctx, 740, 26, '#e9eef5', '워밍업 1:38 3%');
+    })
+  },
+  {
+    name: '인터벌 단계',
+    expectPhases: 6,
+    dataUrl: drawCard(720, 800, '#111823', (ctx)=>{
+      line(ctx, 40, 32, '#4aa8ff', '워밍업 16:04.7 3.00 5:22');
+      line(ctx, 110, 32, '#ff8a3d', '1 러닝 3:00.0 0.61 4:57');
+      line(ctx, 180, 32, '#39d98a', '체력 회복 1:00.0 0.18 5:36');
+      line(ctx, 250, 32, '#ff8a3d', '2 러닝 3:00.0 0.60 5:00');
+      line(ctx, 320, 32, '#39d98a', '체력 회복 1:00.0 0.17 5:40');
+      line(ctx, 390, 32, '#a78bfa', '쿨다운 10:00.0 1.70 5:53');
+    })
+  },
+  {
+    name: '장거리 21.10km',
+    expect: { distanceKm: 21.1, durationSec: 6300, avgHr: 155, calories: 1320 },
+    dataUrl: drawCard(720, 900, '#0b0f14', (ctx)=>{
+      line(ctx, 40, 28, '#8ea0b6', '거리');
+      line(ctx, 80, 60, '#ffffff', '21.10 km');
+      line(ctx, 170, 32, '#e9eef5', '운동 시간  1:45:00');
+      line(ctx, 230, 32, '#e9eef5', "평균 페이스  4'58\" /km");
+      line(ctx, 290, 32, '#ff5d6c', '심박수 155');
+      line(ctx, 340, 32, '#ff5d6c', '최고 심박 172');
+      line(ctx, 400, 32, '#39d98a', '케이던스 176');
+      line(ctx, 450, 32, '#ffb03d', '1320 kcal');
+      line(ctx, 510, 32, '#4aa8ff', '보폭 121 cm');
+      line(ctx, 560, 32, '#e9eef5', '상승 88 m  하강 91 m');
+    })
+  }
+];
+
+(async ()=>{
+  const box = document.getElementById('out');
+  const st = document.getElementById('st');
+  let pass=0, fail=0;
+  try{ await ensureOCR(); }
+  catch(e){
+    st.textContent = 'OCR 엔진 로드 실패: '+e.message;
+    window.__OCR_IMG_TEST = { pass:0, fail:fixtures.length, error:String(e) };
+    return;
+  }
+  for(const f of fixtures){
+    st.textContent = '인식 중… '+f.name;
+    let text='', p={}, ph=[], miss=[];
+    try{
+      text = await ocrImage(f.dataUrl);
+      p = parseTextMetrics(text);
+      ph = parseIntervalPhases(text);
+    }catch(e){ miss.push('OCR 예외 '+e.message); }
+    Object.keys(f.expect||{}).forEach(k=>{
+      if(!near(p[k], f.expect[k])) miss.push(`${k}=${p[k]} (원함 ${f.expect[k]})`);
+    });
+    if(f.expectPhases!=null && ph.length < f.expectPhases) miss.push(`단계 ${ph.length} (원함 ${f.expectPhases})`);
+    const ok = !miss.length;
+    if(ok) pass++; else fail++;
+    box.insertAdjacentHTML('beforeend', `<div class="card ${ok?'ok':'bad'}">
+      <b>${ok?'PASS':'FAIL'} ${f.name}</b><br>
+      <img src="${f.dataUrl}" alt="${f.name}">
+      <div>${ok? `거리 ${p.distanceKm} · ${p.durationSec}s · ♥${p.avgHr} · ${p.cadence}spm · ${p.calories}kcal`
+        : miss.join(' · ')}</div>
+      <pre>${(text||'').slice(0,800)}</pre>
+    </div>`);
+  }
+  st.textContent = `${pass} 통과 / ${fail} 실패`;
+  window.__OCR_IMG_TEST = { pass, fail, total: fixtures.length };
+})();
+</script>
+</body></html>
