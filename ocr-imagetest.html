@@ -162,8 +162,9 @@ const fixtures = [
     st.textContent = '인식 중… '+f.name;
     let text='', p={}, ph=[], miss=[];
     try{
-      text = await ocrImage(f.dataUrl);
-      p = parseTextMetrics(text);
+      const extracted = await extractRunFromImage(f.dataUrl);
+      text = extracted.text || '';
+      p = extracted.p || parseTextMetrics(text);
       ph = parseIntervalPhases(text);
     }catch(e){ miss.push('OCR 예외 '+e.message); }
     Object.keys(f.expect||{}).forEach(k=>{

@@ -6,7 +6,7 @@
 'use strict';
 
 /* 앱 버전 (sw.js 캐시 버전과 동일하게 유지) */
-const APP_VERSION = 'v34';
+const APP_VERSION = 'v35';
 
 /* ---------- 세션 타입 정의 ---------- */
 const TYPES = {
@@ -355,7 +355,7 @@ function normalizeOcrText(text){
   t = t.replace(/(\d{1,2})\s*[°º]\s*(\d{2})/g,"$1'$2");
   t = t.replace(/(\d)\s*ㅁ/g,'$1 m');
   // 한글 라벨 깨짐
-  t = t.replace(/심\s*박\s*수?/g,'심박수').replace(/케\s*이\s*던\s*스|캐이던스|케이던쓰/g,'케이던스');
+  t = t.replace(/심\s*[박벅벡]\s*수?|십\s*박\s*수?/g,'심박수').replace(/케\s*이\s*던\s*스|캐이던스|케이던쓰|게이던스|개이던스/g,'케이던스');
   t = t.replace(/평\s*균/g,'평균').replace(/최\s*고/g,'최고').replace(/최\s*저/g,'최저');
   t = t.replace(/페\s*이\s*스/g,'페이스').replace(/구\s*간/g,'구간');
   t = t.replace(/킬\s*로\s*미\s*터/g,'킬로미터').replace(/거\s*리/g,'거리');
@@ -1066,23 +1066,23 @@ function ensureOCR(){
   });
   return _rcOcrLoading;
 }
-/* OCR 전처리: 그레이스케일 → 어두운 배경 반전 → 대비 강화 → 업스케일
-   (애플 피트니스처럼 '검은 배경 + 컬러 숫자'는 그대로면 인식률이 낮음) */
+/* OCR 전처리: 업스케일 → 어두운 배경 반전 → 약한 대비(한글 얇은 획 보존) */
 function preprocessForOCR(dataUrl){
   return new Promise((resolve)=>{
     const img = new Image();
     img.onload = ()=>{
       try{
-        const targetW = 1800;
-        const scale = img.width < targetW ? Math.min(targetW/img.width, 3) : Math.min(1800/img.width, 1.25);
+        const targetW = 1600;
+        const scale = img.width < targetW ? Math.min(targetW/img.width, 2.6) : Math.min(1600/img.width, 1.15);
         const w = Math.round(img.width*scale), h = Math.round(img.height*scale);
         const cv = document.createElement('canvas'); cv.width=w; cv.height=h;
         const ctx = cv.getContext('2d', { willReadFrequently:true });
+        ctx.imageSmoothingEnabled = true;
         ctx.drawImage(img, 0, 0, w, h);
         const id = ctx.getImageData(0,0,w,h), d = id.data;
         let sum=0; for(let i=0;i<d.length;i+=4){ sum += 0.299*d[i]+0.587*d[i+1]+0.114*d[i+2]; }
         const dark = (sum/(d.length/4)) < 140;
-        const contrast = dark ? 1.85 : 1.35, mid = 128;
+        const contrast = dark ? 1.42 : 1.28, mid = 128;
         for(let i=0;i<d.length;i+=4){
           let g = 0.299*d[i]+0.587*d[i+1]+0.114*d[i+2];
           if(dark) g = 255 - g;
@@ -1106,7 +1106,7 @@ function makeOcrTiles(dataUrl){
       try{
         const tiles = [dataUrl];
         // 세로가 가로의 2.2배 이상이면 겹치는 타일 생성
-        if(img.height > img.width * 2.2){
+        if(img.height > img.width * 1.65){
           const tileH = Math.round(img.width * 1.6);
           const step = Math.round(tileH * 0.72);
           for(let y=0; y<img.height; y+=step){
@@ -1127,32 +1127,207 @@ function makeOcrTiles(dataUrl){
     img.src = dataUrl;
   });
 }
-async function ocrOne(src){
-  const { data } = await Tesseract.recognize(src, 'kor+eng');
-  return data && data.text ? data.text : '';
+async function ocrOne(src, opts){
+  opts = opts || {};
+  const lang = opts.lang || 'kor+eng';
+  const params = {};
+  if(opts.psm!=null) params.tessedit_pageseg_mode = String(opts.psm);
+  if(opts.whitelist) params.tessedit_char_whitelist = opts.whitelist;
+  const { data } = await Tesseract.recognize(src, lang, params);
+  const text = data && data.text ? data.text : '';
+  const words = ((data && data.words) || []).map(w=>({
+    t: String(w.text||'').trim(),
+    c: w.confidence||0,
+    x: w.bbox.x0, y: w.bbox.y0, x1: w.bbox.x1, y1: w.bbox.y1
+  })).filter(w=>w.t);
+  return { text, words };
+}
+function rgbToHsl(r,g,b){
+  r/=255; g/=255; b/=255;
+  const max=Math.max(r,g,b), min=Math.min(r,g,b);
+  let h=0, s=0, l=(max+min)/2;
+  if(max!==min){
+    const d=max-min;
+    s = l>0.5 ? d/(2-max-min) : d/(max+min);
+    if(max===r) h = ((g-b)/d + (g<b?6:0))/6;
+    else if(max===g) h = ((b-r)/d + 2)/6;
+    else h = ((r-g)/d + 4)/6;
+  }
+  return { h:h*360, s, l };
+}
+function isolateColorLayer(dataUrl, kind){
+  return new Promise((resolve)=>{
+    const img = new Image();
+    img.onload = ()=>{
+      try{
+        const maxW = 1200;
+        const scale = img.width>maxW ? maxW/img.width : 1;
+        const w = Math.round(img.width*scale), h = Math.round(img.height*scale);
+        const cv = document.createElement('canvas'); cv.width=w; cv.height=h;
+        const ctx = cv.getContext('2d', { willReadFrequently:true });
+        ctx.drawImage(img, 0, 0, w, h);
+        const id = ctx.getImageData(0,0,w,h), d = id.data;
+        for(let i=0;i<d.length;i+=4){
+          const r=d[i], g=d[i+1], b=d[i+2];
+          const {h:hue,s,l} = rgbToHsl(r,g,b);
+          let keep = false;
+          if(kind==='red') keep = s>0.28 && l>0.22 && l<0.88 && (hue<=18 || hue>=345);
+          else if(kind==='green') keep = s>0.28 && l>0.22 && l<0.88 && hue>=85 && hue<=165;
+          else if(kind==='orange') keep = s>0.35 && l>0.28 && l<0.88 && hue>=18 && hue<=48;
+          else if(kind==='blue') keep = s>0.25 && l>0.22 && l<0.88 && hue>=185 && hue<=235;
+          d[i]=d[i+1]=d[i+2] = keep ? 0 : 255;
+        }
+        ctx.putImageData(id,0,0);
+        resolve(cv.toDataURL('image/png'));
+      }catch(e){ resolve(null); }
+    };
+    img.onerror = ()=> resolve(null);
+    img.src = dataUrl;
+  });
+}
+function parseFromWords(words){
+  const out = {};
+  if(!words || !words.length) return out;
+  const ws = words.map(w=>{
+    const n = normalizeOcrText(w.t);
+    return { ...w, n, cx:(w.x+w.x1)/2, cy:(w.y+w.y1)/2, h:Math.max(8, w.y1-w.y) };
+  });
+  const numsIn = (w, min, max, asFloat)=>{
+    const re = asFloat ? /(\d{1,3}(?:[.,]\d+)?)/g : /(\d{2,4})/g;
+    return [...w.n.matchAll(re)].map(m=> asFloat ? parseFloat(m[1].replace(',','.')) : +m[1])
+      .filter(v=> v>=min && v<=max);
+  };
+  const around = (label, min, max, asFloat)=>{
+    const found = [];
+    for(const w of ws){
+      if(w===label) continue;
+      const sameRow = Math.abs(w.cy-label.cy) < Math.max(label.h, w.h)*1.35 && w.cx > label.x-8;
+      const below = w.cy > label.cy-label.h*0.3 && w.cy < label.cy + label.h*3.4 && Math.abs(w.cx-label.cx) < 280;
+      if(!(sameRow || below)) continue;
+      numsIn(w, min, max, asFloat).forEach(v=> found.push({ v, x:w.cx, y:w.cy }));
+    }
+    found.sort((a,b)=> a.y-b.y || a.x-b.x);
+    return found.map(x=>x.v);
+  };
+  const firstLabel = (re)=> ws.find(w=> re.test(w.n));
+  const hrL = firstLabel(/심박|heart\s*rate|\bHR\b/i);
+  if(hrL){
+    const ns = around(hrL, 90, 220, false);
+    if(ns[0]!=null) out.avgHr = ns[0];
+    if(ns[1]!=null) out.hrMax = Math.max(ns[0], ns[1]);
+  }
+  const cadL = firstLabel(/케이던스|cadence/i);
+  if(cadL){
+    const ns = around(cadL, 120, 240, false);
+    if(ns[0]!=null) out.cadence = ns[0];
+    if(ns[1]!=null) out.cadMax = Math.max(ns[0], ns[1]);
+  }
+  const stL = firstLabel(/보폭|stride/i);
+  if(stL){
+    const ns = around(stL, 70, 180, false);
+    if(ns[0]!=null) out.strideCm = ns[0];
+    if(ns[1]!=null) out.strideMaxCm = Math.max(ns[0], ns[1]);
+  }
+  const gctL = firstLabel(/지면|GCT|접촉/i);
+  if(gctL){
+    const ns = around(gctL, 150, 420, false);
+    if(ns[0]!=null) out.gctMs = ns[0];
+    if(ns[1]!=null) out.gctMaxMs = Math.max(ns[0], ns[1]);
+  }
+  const flL = firstLabel(/비행|flight/i);
+  if(flL){
+    const ns = around(flL, 40, 180, false);
+    if(ns[0]!=null) out.flightMs = ns[0];
+    if(ns[1]!=null) out.flightMaxMs = Math.max(ns[0], ns[1]);
+  }
+  const calL = firstLabel(/칼로리|kcal|열량/i);
+  if(calL){
+    const ns = around(calL, 30, 4000, false);
+    if(ns[0]!=null) out.calories = ns[0];
+  }
+  const distCands = [];
+  for(const w of ws){
+    if(!/(?:km|킬로|거리|\d+[.,]\d{2})/i.test(w.n)) continue;
+    numsIn(w, 0.2, 80, true).forEach(v=>{
+      if(v<80) distCands.push({ v, y:w.cy, h:w.h, partial: Math.abs(v-Math.round(v))>0.02 });
+    });
+  }
+  if(distCands.length){
+    const pool = distCands.filter(x=>x.partial).length ? distCands.filter(x=>x.partial) : distCands;
+    pool.sort((a,b)=> b.h-a.h || a.y-b.y);
+    out.distanceKm = pool[0].v;
+  }
+  return out;
+}
+function parseNumbersFromText(text, min, max){
+  return [...String(text||'').matchAll(/(\d{2,4})(?:[.,]\d+)?/g)]
+    .map(m=>+m[1]).filter(v=> v>=min && v<=max);
+}
+function fillMissingMetrics(dst, src){
+  if(!src) return dst;
+  Object.keys(src).forEach(k=>{
+    if(src[k]!=null && dst[k]==null) dst[k]=src[k];
+  });
+  return dst;
+}
+function needsColorFallback(p){
+  return !p || p.avgHr==null || p.avgHr<90 || p.cadence==null || p.calories==null;
+}
+async function ocrColorLayers(dataUrl){
+  const out = {};
+  const jobs = [
+    ['red', 90, 220, (ns)=>{ if(ns[0]!=null) out.avgHr=ns[0]; if(ns[1]!=null) out.hrMax=Math.max(ns[0],ns[1]); }],
+    ['green', 130, 230, (ns)=>{ if(ns[0]!=null) out.cadence=ns[0]; if(ns[1]!=null) out.cadMax=Math.max(ns[0],ns[1]); }],
+    ['orange', 40, 3500, (ns)=>{ if(ns[0]!=null) out.calories=ns[0]; }],
+    ['blue', 70, 180, (ns)=>{ if(ns[0]!=null) out.strideCm=ns[0]; if(ns[1]!=null) out.strideMaxCm=Math.max(ns[0],ns[1]); }]
+  ];
+  for(const [kind, min, max, apply] of jobs){
+    try{
+      const layer = await isolateColorLayer(dataUrl, kind);
+      if(!layer) continue;
+      const r = await ocrOne(layer, { lang:'eng', psm:11, whitelist:"0123456789.'\":km /" });
+      const ns = parseNumbersFromText(r.text, min, max);
+      apply(ns);
+    }catch(e){}
+  }
+  return out;
 }
 async function ocrImage(dataUrl){
   await ensureOCR();
   let pre = dataUrl;
   try{ pre = await preprocessForOCR(dataUrl); }catch(e){}
   const texts = [];
+  const words = [];
+  const take = (r)=>{
+    if(!r) return;
+    if(r.text) texts.push(r.text);
+    if(r.words && r.words.length) words.push(...r.words);
+  };
   try{
     const tiles = await makeOcrTiles(pre);
     for(const tile of tiles){
-      try{ const tx = await ocrOne(tile); if(tx) texts.push(tx); }catch(e){}
+      try{ take(await ocrOne(tile)); }catch(e){}
     }
   }catch(e){}
   if(!texts.length){
-    try{ texts.push(await ocrOne(pre)); }catch(e){}
+    try{ take(await ocrOne(pre)); }catch(e){}
   }
-  // 원본 1패스 보강 (전처리가 밝은 Zepp UI를 망가뜨린 경우)
-  if(texts.join('').length < 80 || !/심박|케이던스|bpm|spm|페이스|경사|고도|보폭/i.test(texts.join('\n'))){
-    try{
-      const raw = await ocrOne(dataUrl);
-      if(raw) texts.push(raw);
-    }catch(e){}
+  const joined = texts.join('\n');
+  if(joined.length < 80 || !/심박|케이던스|bpm|spm|페이스|경사|고도|보폭|kcal|거리/i.test(joined)){
+    try{ take(await ocrOne(dataUrl)); }catch(e){}
   }
-  return normalizeOcrText(texts.join('\n'));
+  return { text: normalizeOcrText(texts.join('\n')), words };
+}
+async function extractRunFromImage(dataUrl){
+  const ocr = await ocrImage(dataUrl);
+  const text = ocr.text || '';
+  const p = parseTextMetrics(text);
+  fillMissingMetrics(p, parseFromWords(ocr.words||[]));
+  if(needsColorFallback(p)){
+    try{ fillMissingMetrics(p, await ocrColorLayers(dataUrl)); }catch(e){}
+  }
+  reconcileRunMetrics(p);
+  return { text, p, words: ocr.words||[] };
 }
 /* 텍스트에서 날짜 추출 (애플/한국어/숫자 형식) */
 function mkDateISO(y, mo, d){
@@ -1177,8 +1352,9 @@ function parseDateFromText(text){
 async function applyOcrToRecord(rec){
   const f = await DB.get('files', rec.id);
   if(!f || !f.dataUrl) return false;
-  const text = await ocrImage(f.dataUrl);
-  const p = parseTextMetrics(text);
+  const extracted = await extractRunFromImage(f.dataUrl);
+  const text = extracted.text || '';
+  const p = extracted.p || parseTextMetrics(text);
   // 재인식은 이미지 값을 진실로 — 예전 잘못된 17:49/심박65를 남기지 않음
   ['distanceKm','durationSec','avgPaceSec','bestPaceSec','avgHr','hrMax','cadence','cadMax','calories'].forEach(k=>{
     if(p[k]!=null) rec[k]=p[k];
@@ -1220,8 +1396,8 @@ async function applyOcrToRecord(rec){
 }
 /* 수치 없는 이미지 기록 일괄 인식 */
 async function ocrAllImages(){
-  const targets = state.records.filter(r=>r.hasImage && (r.distanceKm==null || r.avgPaceSec==null));
-  if(!targets.length){ toast('인식할 이미지 기록이 없어요 (이미 인식됨)'); return; }
+  const targets = state.records.filter(r=>r.hasImage);
+  if(!targets.length){ toast('인식할 이미지 기록이 없어요'); return; }
   toast('인식 엔진 준비 중… (첫 실행은 다운로드로 20~40초 걸릴 수 있어요)');
   try{ await ensureOCR(); }
   catch(e){ toast('인식 엔진 로드 실패 · 인터넷 연결 확인 후 다시 시도'); return; }
@@ -1847,8 +2023,17 @@ async function reclassifyAllAuto(){
 /* 이미지 1장 → OCR + 파싱 → 매칭용 item 객체 (첨부/분리 재인식에 공용) */
 async function buildImageItem(dataUrl, fileName, mtime, ocrReady){
   let text = '';
-  if(ocrReady!==false){ try{ text = await ocrImage(dataUrl); }catch(e){} }
-  const p = parseTextMetrics(text||fileName||'');
+  let p = {};
+  if(ocrReady!==false){
+    try{
+      const extracted = await extractRunFromImage(dataUrl);
+      text = extracted.text || '';
+      p = extracted.p || {};
+    }catch(e){ p = parseTextMetrics(fileName||''); }
+  } else {
+    p = parseTextMetrics(fileName||'');
+  }
+  if(!p || !Object.keys(p).length) p = parseTextMetrics(text||fileName||'');
   const phases = parseIntervalPhases(text||'');
   const isPhase = isPhaseWorkout(phases);
   const splits = isPhase ? [] : parseSplits(text||'');
@@ -1947,7 +2132,9 @@ async function handleFiles(files){
     recompute();                 // 전체 데이터로 훈련 존/학습치 계산
     await reclassifyAllAuto();    // 존이 갖춰진 뒤 자동 분류 기록 재판정
     recompute(); renderRecords();
-    toast(`정리 완료 · 새 기록 ${recCount}개${mergedCount?` · 사진 ${mergedCount}장 같은 러닝에 매칭`:''}`);
+    const sample = (items[0] && items[0].p) || {};
+    const hint = ` · ${sample.distanceKm!=null?sample.distanceKm+'km':'거리?'} · ♥${sample.avgHr||'-'} · ${sample.cadence||'-'}spm`;
+    toast(`정리 완료 · 새 기록 ${recCount}개${mergedCount?` · 사진 ${mergedCount}장 같은 러닝에 매칭`:''}${hint}`);
   } else if(added){
     recompute(); await reclassifyAllAuto(); recompute(); renderRecords();
     toast(fileBad
@@ -4562,4 +4749,6 @@ window.parseDistanceKm = parseDistanceKm;
 window.normalizeOcrText = normalizeOcrText;
 window.ocrImage = ocrImage;
 window.ensureOCR = ensureOCR;
+window.extractRunFromImage = extractRunFromImage;
+window.parseFromWords = parseFromWords;
 if(!window.RC_TEST) boot();

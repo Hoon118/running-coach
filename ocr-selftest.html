@@ -8,7 +8,7 @@ body{font-family:sans-serif;background:#111;color:#eee;padding:16px}
 <h2>OCR 파서 셀프테스트</h2>
 <div id="out">로딩…</div>
 <script>window.RC_TEST = true;</script>
-<script src="app.js?v=34"></script>
+<script src="app.js?v=35"></script>
 <script>
 const cases = [
   {
@@ -171,6 +171,25 @@ O6:11
   }
 ];
 
+const wordCases = [
+  {
+    name: '좌표 파싱: 라벨 아래 평균/최고',
+    words: [
+      { t:'심박수', x:40, y:100, x1:140, y1:130 },
+      { t:'139', x:40, y:140, x1:100, y1:180 },
+      { t:'bpm', x:110, y:150, x1:160, y1:175 },
+      { t:'153', x:180, y:140, x1:240, y1:180 },
+      { t:'케이던스', x:40, y:220, x1:160, y1:250 },
+      { t:'182', x:40, y:260, x1:100, y1:300 },
+      { t:'spm', x:110, y:270, x1:160, y1:295 },
+      { t:'192', x:180, y:260, x1:240, y1:300 },
+      { t:'1.11', x:40, y:20, x1:160, y1:80 },
+      { t:'km', x:170, y:40, x1:220, y1:70 }
+    ],
+    expect: { avgHr:139, hrMax:153, cadence:182, cadMax:192, distanceKm:1.11 }
+  }
+];
+
 function near(v, exp){
   if(Array.isArray(exp)) return v>=exp[0] && v<=exp[1];
   if(exp==null) return v==null;
@@ -211,7 +230,17 @@ for(const c of cases){
       : miss.join(' · ')
   }<pre>${JSON.stringify({distanceKm:p.distanceKm,durationSec:p.durationSec,avgPaceSec:p.avgPaceSec,bestPaceSec:p.bestPaceSec,avgHr:p.avgHr,hrMax:p.hrMax,cadence:p.cadence,cadMax:p.cadMax,calories:p.calories,strideCm:p.strideCm,gctMs:p.gctMs,flightMs:p.flightMs,flightMaxMs:p.flightMaxMs,vertOscCm:p.vertOscCm,ascentM:p.ascentM,descentM:p.descentM,gradeDist:p.gradeDist,hrZones:p.hrZones,splits:sp.length,phases:ph.length},null,0)}</pre></div>`);
 }
+for(const c of wordCases){
+  const p = parseFromWords(c.words);
+  const miss = [];
+  Object.keys(c.expect).forEach(k=>{
+    if(!near(p[k], c.expect[k])) miss.push(`${k}=${p[k]} (원함 ${c.expect[k]})`);
+  });
+  const ok = !miss.length;
+  if(ok) pass++; else fail++;
+  lines.push(`<div class="${ok?'ok':'bad'}"><b>${ok?'PASS':'FAIL'} ${c.name}</b><br>${ok?JSON.stringify(p):miss.join(' · ')}</div>`);
+}
 document.getElementById('out').innerHTML = `<p>${pass} 통과 / ${fail} 실패</p>`+lines.join('');
-window.__OCR_TEST = { pass, fail, total: cases.length };
+window.__OCR_TEST = { pass, fail, total: cases.length + wordCases.length };
 </script>
 </body></html>
