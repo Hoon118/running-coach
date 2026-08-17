@@ -12,7 +12,7 @@ img{max-width:280px;border:1px solid #444;margin:6px 0}
 <p id="st">이미지 생성 · OCR 엔진 로드 중…</p>
 <div id="out"></div>
 <script>window.RC_TEST = true;</script>
-<script src="app.js?v=34img"></script>
+<script src="app.js?v=37"></script>
 <script>
 function near(v, exp){
   if(Array.isArray(exp)) return v>=exp[0] && v<=exp[1];
@@ -87,7 +87,7 @@ const fixtures = [
   },
   {
     name: 'Amazfit 공유카드',
-    expect: { distanceKm: 1.11, durationSec: [370, 400] },
+    expect: { distanceKm: 1.11, durationSec: [340, 360], avgPaceSec: 310 },
     dataUrl: drawCard(720, 720, '#151d2a', (ctx)=>{
       line(ctx, 40, 28, '#8ea0b6', '야외 달리기');
       line(ctx, 90, 24, '#6b7d94', '8월 15일 17:49');

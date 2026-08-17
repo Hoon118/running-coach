@@ -6,7 +6,7 @@
 'use strict';
 
 /* 앱 버전 (sw.js 캐시 버전과 동일하게 유지) */
-const APP_VERSION = 'v36';
+const APP_VERSION = 'v37';
 
 /* ---------- 세션 타입 정의 ---------- */
 const TYPES = {
@@ -366,6 +366,9 @@ function normalizeOcrText(text){
   t = t.replace(/수직\s*진\s*동/g,'수직진폭').replace(/오르막\s*합계/g,'상승').replace(/내리막\s*합계/g,'하강');
   t = t.replace(/공\s*중\s*체\s*류\s*시\s*간/g,'비행시간').replace(/웜\s*업/g,'워밍업');
   t = t.replace(/카\s*로\s*리|칼\s*로\s*리/g,'칼로리');
+  t = t.replace(/(\d{1,2})\s*월\s*[Il|](\d)\s*일/g,'$1월 1$2일');
+  t = t.replace(/(\d{1,2})\s*월\s*(\d)\s+(\d)\s*일/g,'$1월 $2$3일');
+  t = t.replace(/(\d{1,2})\s*월\s*(\d{1,2})\s*일(\d{1,2})\s*:/g,'$1월 $2일 $3:');
   return t;
 }
 /* 라벨 근처 숫자 추출 (같은 줄·다음 줄·숫자 뒤 라벨) */
@@ -458,12 +461,59 @@ function isDurationMasqueradingAsKm(v, text){
   if(v==null || !isFinite(v)) return false;
   return durationTokens(text).some(d=> Math.abs(d.decimal - v) < 0.021);
 }
+/* 1.00(구간) + 0.11(나머지) → 1.11. 정수 km만 있으면 총거리로 쓰지 않음 */
+function pickBestDistance(cands){
+  const uniq = [...new Set((cands||[]).map(v=>+Number(v).toFixed(2)))].filter(v=>v>0.05&&v<300);
+  if(!uniq.length) return null;
+  const remainders = uniq.filter(v=> v<0.95);
+  const wholes = uniq.filter(v=> v>=0.98 && Math.abs(v-Math.round(v))<=0.02);
+  const totals = uniq.filter(v=> v>=1 && Math.abs(v-Math.round(v))>0.02);
+  if(totals.length){
+    const short = totals.filter(v=>v<3.2);
+    return Math.max(...(short.length?short:totals));
+  }
+  if(wholes.length && remainders.length){
+    const w = Math.min(...wholes.filter(v=>v<=3));
+    const r = Math.max(...remainders);
+    if(w>=0.98 && r>0) return +(w+r).toFixed(2);
+  }
+  const short = uniq.filter(v=>v<3.2 && Math.abs(v-Math.round(v))>0.02);
+  if(short.length) return Math.max(...short);
+  if(wholes.length===1 && wholes[0]>=3) return wholes[0];
+  return wholes.length ? Math.max(...wholes) : Math.max(...uniq);
+}
+/* 공유카드 큰 숫자 3개: 05'48"(시간) 05'10"(평균페이스) 05'12" */
+function classifyMssRow(tokens, distanceKm){
+  const sec = (tokens||[]).filter(s=> s>=150 && s<=1200);
+  if(!sec.length) return {};
+  if(sec.length>=2 && distanceKm){
+    const implied = sec[0] / distanceKm;
+    if(sec.slice(1).some(p=> Math.abs(implied-p)<=12)){
+      return {
+        durationSec: sec[0],
+        avgPaceSec: sec[1],
+        bestPaceSec: Math.min(...sec.slice(1))
+      };
+    }
+  }
+  if(sec.length>=3){
+    const rest = sec.slice(1);
+    const restMed = [...rest].sort((a,b)=>a-b)[Math.floor(rest.length/2)];
+    if(Math.abs(sec[0]-restMed)>=18 && rest.every(p=> Math.abs(p-restMed)<=15)){
+      return { durationSec: sec[0], avgPaceSec: rest[0], bestPaceSec: Math.min(...rest) };
+    }
+    const sorted = [...sec].sort((a,b)=>a-b);
+    return { avgPaceSec: sorted[1], bestPaceSec: sorted[0] };
+  }
+  return { avgPaceSec: sec[0], bestPaceSec: sec.length>1 ? Math.min(...sec) : null };
+}
 /* 페이스 토큰을 km로 오인하지 않게 거리만 고른다 */
 function parseDistanceKm(t){
   const labeled = t.match(/(?:총\s*)?거리\D{0,16}(\d{1,3}(?:[.,]\d{1,2}))\s*(?:k\s*m|킬로)?/i);
   if(labeled){
     const v = parseFloat(labeled[1].replace(',','.'));
-    if(v>0.05 && v<300 && !isDurationMasqueradingAsKm(v, t) && !isTimeLikeRaw(labeled[0])) return v;
+    if(v>0.05 && v<300 && !isDurationMasqueradingAsKm(v, t) && !isTimeLikeRaw(labeled[0])
+      && Math.abs(v-Math.round(v))>0.02) return v;
   }
   const cands = [];
   const re = /(\d{1,3}(?:[.,]\d{1,2}))\s*(?:k\s*m|킬로|k\s*[nr])/gi;
@@ -472,10 +522,10 @@ function parseDistanceKm(t){
     const v = parseFloat(mm[1].replace(',','.'));
     if(!(v>0.05 && v<300)) continue;
     const from = Math.max(0, mm.index-18);
-    const ctx = t.slice(from, mm.index+mm[0].length+8);
-    // 05'37"/km · 5'10"/km 같은 페이스를 거리로 읽지 않음
-    if(/['’‘`´′:]\s*\d{2}/.test(ctx) || /\/\s*k\s*m/i.test(ctx)) continue;
-    if(/페이스|최고|베스트|예측|목표|5\s*k\b|10\s*k/i.test(ctx) && v>=3.5 && v<=12) continue;
+    const before = t.slice(from, mm.index);
+    // 05'37"/km · 5'10"/km 만 제외. 1.00 km 05'32" 구간행의 거리는 살림
+    if(/['’‘`´′:]\s*\d{0,2}\s*$/.test(before) || /\/\s*$/.test(before)) continue;
+    if(/페이스|최고|베스트|예측|목표|5\s*k\b|10\s*k/i.test(before) && v>=3.5 && v<=12) continue;
     if(isTimeLikeRaw(mm[0]) || isDurationMasqueradingAsKm(v, t)) continue;
     // 05.46.05 처럼 점이 두 번인 시간 토큰
     if(/^\d{1,2}[.,]\d{2}[.,]\d{2}/.test(t.slice(mm.index))) continue;
@@ -493,17 +543,12 @@ function parseDistanceKm(t){
     }
   }
   if(!cands.length) return null;
-  // 1.00 같은 정수 km(구간)보다 1.11 같은 총거리를 우선
-  const partials = cands.filter(v=> Math.abs(v-Math.round(v))>0.02);
-  const pool = partials.length ? partials : cands;
-  // 최댓값이 아니라, 페이스대(4~8)로 보이는 값보다 짧은 실거리를 고름
-  const short = pool.filter(v=> v<3.2);
-  if(short.length) return Math.max(...short);
-  return Math.max(...pool);
+  return pickBestDistance(cands);
 }
 function isClockContext(text, idx){
-  const before = String(text||'').slice(Math.max(0, idx-24), idx);
-  return /월|일|오전|오후|\bAM\b|\bPM\b|시작|시각|날짜/.test(before);
+  const before = String(text||'').slice(0, idx);
+  const lineBefore = before.slice(before.lastIndexOf('\n')+1);
+  return /월|일|오전|오후|\bAM\b|\bPM\b|시작|시각|날짜/.test(lineBefore);
 }
 function plausibleRunPace(secPerKm){
   return secPerKm>=150 && secPerKm<=720; // 2:30~12:00/km
@@ -514,10 +559,18 @@ function parseWorkoutHeader(t){
   const head = String(t||'').slice(0, 1100);
   const distAll = [...head.matchAll(/(\d{1,2}[.,]\d{2})\s*(?:k\s*m|킬로)/gi)]
     .map(x=>({ v:parseFloat(x[1].replace(',','.')), index:x.index, raw:x[0] }))
-    .filter(x=> x.v>0.05 && x.v<40 && !/['’]/.test(head.slice(Math.max(0,x.index-8), x.index))
-      && !isDurationMasqueradingAsKm(x.v, head) && !/^\d{1,2}[.,]\d{2}[.,]\d{2}/.test(head.slice(x.index)));
-  const distM = distAll.find(x=> Math.abs(x.v-Math.round(x.v))>0.02) || distAll[0];
-  if(distM) out.distanceKm = distM.v;
+    .filter(x=>{
+      const lineStart = head.lastIndexOf('\n', x.index-1)+1;
+      const before = head.slice(Math.max(lineStart, x.index-6), x.index);
+      return x.v>0.05 && x.v<40 && !/['’]/.test(before)
+        && !isDurationMasqueradingAsKm(x.v, head) && !/^\d{1,2}[.,]\d{2}[.,]\d{2}/.test(head.slice(x.index));
+    });
+  const bestHead = pickBestDistance(distAll.map(x=>x.v));
+  const distM = (bestHead!=null && distAll.find(x=> Math.abs(x.v-bestHead)<0.021))
+    || distAll.find(x=> Math.abs(x.v-Math.round(x.v))>0.02)
+    || distAll[0];
+  if(bestHead!=null) out.distanceKm = bestHead;
+  else if(distM) out.distanceKm = distM.v;
   const calM = head.match(/(\d{2,4})\s*k\s*ca[l1]/i);
   if(calM) out.calories = +calM[1];
   const paceM = head.match(/(\d{1,2})\s*['’‘`´′:]\s*(\d{2})\s*["”“''′″]?\s*\/\s*k\s*m/i)
@@ -570,6 +623,9 @@ function parseWorkoutHeader(t){
   if(out.avgPaceSec==null && out.distanceKm){
     const from = distM ? distM.index + distM.raw.length : 0;
     const window2 = head.slice(from, from+360);
+    if(/구간\s*(?:별)?\s*기록|스\s*플\s*릿/i.test(head.slice(0, from+80)+window2)){
+      // 구간표 페이스는 평균이 아님
+    } else {
     const orphan = [];
     for(const pm of window2.matchAll(/(\d{1,2})\s*['’‘`´′:]\s*(\d{2})/g)){
       const absIdx = from + pm.index;
@@ -577,9 +633,16 @@ function parseWorkoutHeader(t){
       const s = parsePaceToken(pm[1], pm[2]);
       if(s && plausibleRunPace(s)) orphan.push(s);
     }
-    if(orphan.length){
-      out.avgPaceSec = orphan[0];
-      if(orphan.length>=2) out.bestPaceSec = Math.min(...orphan);
+    const row = classifyMssRow(orphan, out.distanceKm);
+    if(row.avgPaceSec){ out.avgPaceSec = row.avgPaceSec; out._paceLocked = true; }
+    if(row.bestPaceSec && out.bestPaceSec==null) out.bestPaceSec = row.bestPaceSec;
+    if(row.durationSec && out.durationSec==null) out.durationSec = row.durationSec;
+    if(row.durationSec && row.avgPaceSec){
+      const implied = +(row.durationSec / row.avgPaceSec).toFixed(2);
+      if(out.distanceKm==null || (Math.abs(out.distanceKm-Math.round(out.distanceKm))<=0.02 && implied>0.2 && implied<80)){
+        out.distanceKm = implied;
+      }
+    }
     }
   }
   if(out.distanceKm && out.avgPaceSec && !out.durationSec){
@@ -757,7 +820,20 @@ function parseTextMetrics(text){
   const t = normalizeOcrText(text);
   const out = parseWorkoutHeader(t);
   const dist = parseDistanceKm(t);
-  if(dist && (out.distanceKm==null || (dist<3.2 && out.distanceKm>=3.2))) out.distanceKm = dist;
+  if(dist && (out.distanceKm==null || (dist<3.2 && out.distanceKm>=3.2)
+    || (Math.abs(out.distanceKm-Math.round(out.distanceKm))<=0.02 && Math.abs(dist-Math.round(dist))>0.02))){
+    out.distanceKm = dist;
+    if(!/\/\s*k\s*m/i.test(t.slice(0,500))){
+      const orphan = [...t.slice(0,420).matchAll(/(\d{1,2})\s*['’‘`´′:]\s*(\d{2})/g)]
+        .filter(mm=>!isClockContext(t, mm.index))
+        .map(mm=>(+mm[1])*60+(+mm[2]))
+        .filter(s=>s>=150&&s<=1200);
+      const row = classifyMssRow(orphan, out.distanceKm);
+      if(row.avgPaceSec){ out.avgPaceSec = row.avgPaceSec; out._paceLocked = true; }
+      if(row.bestPaceSec) out.bestPaceSec = row.bestPaceSec;
+      if(row.durationSec) out.durationSec = row.durationSec;
+    }
+  }
   const dur = parseDurationSec(t);
   if(dur){
     const explicit = /운동\s*시간|총\s*시간|소요\s*시간|duration/i.test(t)
@@ -769,7 +845,11 @@ function parseTextMetrics(text){
   let m = t.match(/(?:평균\s*)?페이스\D{0,12}(\d{1,2})\s*['’‘`´′:]\s*(\d{2})/i)
     || t.match(/(\d{1,2})\s*['’‘`´′:]\s*(\d{2})\s*["”“''′″]?\s*\/\s*k\s*m/i)
     || t.match(/(\d{1,2})\s+(\d{2})\s*["”“''′″]?\s*\/\s*k\s*m/i);
-  if(m){ const s=parsePaceToken(m[1], m[2]); if(s) out.avgPaceSec=s; }
+  if(m){
+    const s=parsePaceToken(m[1], m[2]);
+    const labeled = /평균\s*페이스|\/\s*k\s*m/i.test(m[0]);
+    if(s && (out.avgPaceSec==null || (labeled && !out._paceLocked))) out.avgPaceSec=s;
+  }
   m = t.match(/(?:최고|베스트|best)\s*페이스\D{0,12}(\d{1,2})\s*['’‘`´′:]\s*(\d{2})/i);
   if(m){ const s=parsePaceToken(m[1], m[2]); if(s) out.bestPaceSec=s; }
   if(out.avgPaceSec==null || out.bestPaceSec==null){
@@ -949,6 +1029,7 @@ function parseTextMetrics(text){
   // 파생: 페이스<->시간/거리
   if(out.distanceKm && out.durationSec && !out.avgPaceSec) out.avgPaceSec = out.durationSec / out.distanceKm;
   if(out.distanceKm && out.avgPaceSec && !out.durationSec) out.durationSec = Math.round(out.avgPaceSec * out.distanceKm);
+  delete out._paceLocked;
   return reconcileRunMetrics(out, t);
 }
 
@@ -1125,10 +1206,18 @@ function phasesTotals(ph){
 function splitsTotals(sp){
   const n = sp.length;
   const durationSec = sp.reduce((s,x)=>s+x.tSec,0);        // 총시간 = 구간 시간 합(견고)
-  // 애플 스플릿은 각 구간=정확히 1.00km, 마지막만 부분 → 페이스 OCR 오류에 안 흔들리게 계산
-  const last = sp[n-1];
-  const lastFrac = (last && last.pace) ? Math.min(1.0, Math.max(0.05, last.tSec/last.pace)) : 1.0;
-  const distanceKm = +((n-1) + lastFrac).toFixed(2);
+  const kmHints = sp.map(x=>x.km).filter(v=>v!=null && v>0);
+  let distanceKm;
+  if(kmHints.length>=2){
+    distanceKm = pickBestDistance(kmHints) || +kmHints.reduce((a,b)=>a+b,0).toFixed(2);
+    if(kmHints.some(v=>v<0.95) && kmHints.some(v=>Math.abs(v-1)<=0.02)){
+      distanceKm = +kmHints.reduce((a,b)=>a+b,0).toFixed(2);
+    }
+  } else {
+    const last = sp[n-1];
+    const lastFrac = (last && last.pace) ? Math.min(1.0, Math.max(0.05, last.tSec/last.pace)) : 1.0;
+    distanceKm = +((n-1) + lastFrac).toFixed(2);
+  }
   const avgPaceSec = distanceKm? Math.round(durationSec/distanceKm) : null;
   const wavg = (f)=>{ const r=sp.filter(x=>x[f]!=null); if(!r.length) return null;
     const w=r.reduce((s,x)=>s+x.tSec,0); return w? Math.round(r.reduce((s,x)=>s+x[f]*x.tSec,0)/w):null; };
@@ -1336,9 +1425,8 @@ function parseFromWords(words){
     });
   }
   if(distCands.length){
-    const pool = distCands.filter(x=>x.partial).length ? distCands.filter(x=>x.partial) : distCands;
-    pool.sort((a,b)=> b.h-a.h || a.y-b.y);
-    out.distanceKm = pool[0].v;
+    const picked = pickBestDistance(distCands.map(x=>x.v));
+    if(picked) out.distanceKm = picked;
   }
   return out;
 }
@@ -1405,7 +1493,13 @@ async function extractRunFromImage(dataUrl){
   const ocr = await ocrImage(dataUrl);
   const text = ocr.text || '';
   const p = parseTextMetrics(text);
-  fillMissingMetrics(p, parseFromWords(ocr.words||[]));
+  const fromWords = parseFromWords(ocr.words||[]);
+  fillMissingMetrics(p, fromWords);
+  if(p.distanceKm!=null && fromWords.distanceKm!=null
+    && Math.abs(p.distanceKm-Math.round(p.distanceKm))<=0.02
+    && Math.abs(fromWords.distanceKm-Math.round(fromWords.distanceKm))>0.02){
+    p.distanceKm = fromWords.distanceKm;
+  }
   if(needsColorFallback(p)){
     try{ fillMissingMetrics(p, await ocrColorLayers(dataUrl)); }catch(e){}
   }
@@ -1422,13 +1516,40 @@ function mkDateISO(y, mo, d){
   if(!y && dt.getTime() > now.getTime() + 86400000) dt.setFullYear(year-1);
   return dt.toISOString();
 }
+function parseDateFromFileName(name){
+  const m = String(name||'').match(/(20\d{2})[-_.]?(\d{2})[-_.]?(\d{2})/);
+  if(!m) return null;
+  const mo=+m[2], d=+m[3];
+  if(mo>=1 && mo<=12 && d>=1 && d<=31) return mkDateISO(+m[1], mo, d);
+  return null;
+}
 function parseDateFromText(text){
-  const t = (text||'').replace(/\s+/g,' ');
+  const t = normalizeOcrText(text||'').replace(/\s+/g,' ');
   let m;
-  m = t.match(/(20\d{2})\s*[.\-\/년]\s*(\d{1,2})\s*[.\-\/월]\s*(\d{1,2})/); // 2025.7.13 / 2025년 7월 13일
+  m = t.match(/(20\d{2})\s*[.\-\/년]\s*(\d{1,2})\s*[.\-\/월]\s*(\d{1,2})/);
   if(m) return mkDateISO(+m[1], +m[2], +m[3]);
-  m = t.match(/(\d{1,2})\s*월\s*(\d{1,2})\s*일/);                          // 7월 13일
-  if(m && +m[1]>=1 && +m[1]<=12 && +m[2]>=1 && +m[2]<=31) return mkDateISO(null, +m[1], +m[2]);
+  // 헤더 시각(17:49)의 17을 일자로 쓰지 않음
+  const clockHours = new Set();
+  for(const x of t.matchAll(/(\d{1,2})\s*:\s*(\d{2})(?!\s*:\s*\d)/g)){
+    if(+x[1]<=23 && +x[2]<=59) clockHours.add(+x[1]);
+  }
+  const dated = [...t.matchAll(/(\d{1,2})\s*월\s*(\d{1,2})\s*일/g)]
+    .map(x=>({ mo:+x[1], d:+x[2] }))
+    .filter(x=> x.mo>=1 && x.mo<=12 && x.d>=1 && x.d<=31);
+  const prefer = dated.find(x=> !clockHours.has(x.d));
+  if(prefer) return mkDateISO(null, prefer.mo, prefer.d);
+  // 8월 15 17:49 (일 글자 없음) — 뒤가 시각이면 그 숫자는 일자 아님
+  m = t.match(/(\d{1,2})\s*월\s*(\d{1,2})(?!\d)(?!\s*(?:일|:))/);
+  if(m && +m[1]>=1 && +m[1]<=12 && +m[2]>=1 && +m[2]<=31 && !clockHours.has(+m[2])){
+    return mkDateISO(null, +m[1], +m[2]);
+  }
+  m = t.match(/(?:^|[^\d])(\d{1,2})\s*[./]\s*(\d{1,2})(?!\d)(?!\s*[./]\d)/);
+  if(m && +m[1]>=1 && +m[1]<=12 && +m[2]>=1 && +m[2]<=31 && !clockHours.has(+m[2])){
+    return mkDateISO(null, +m[1], +m[2]);
+  }
+  const mo = t.match(/(\d{1,2})\s*월/);
+  const days = [...t.matchAll(/(\d{1,2})\s*일/g)].map(x=>+x[1]).filter(d=>d>=1&&d<=31&&!clockHours.has(d));
+  if(mo && +mo[1]>=1 && +mo[1]<=12 && days.length) return mkDateISO(null, +mo[1], days[0]);
   return null;
 }
 /* 한 기록의 첨부 이미지를 OCR해서 수치 + 날짜 채우기 */
@@ -1448,13 +1569,12 @@ async function applyOcrToRecord(rec){
     rec.durationSec = rec.avgPaceSec ? Math.round(rec.avgPaceSec*rec.distanceKm) : null;
     changed = true;
   }
-  reconcileRunMetrics(rec);
   if(p.hrZones) rec.hrZones = p.hrZones;
   else if(rec.hrZones && rec.durationSec){
     const sum = Object.values(rec.hrZones).reduce((s,z)=>s+(z.sec||0),0);
     if(sum > rec.durationSec*1.2){ rec.hrZones=null; changed=true; }
   }
-  const iso = parseDateFromText(text);
+  const iso = parseDateFromText(text) || parseDateFromFileName(rec.fileName);
   if(iso){ rec.date = iso; changed = true; }
   const phases = parseIntervalPhases(text);
   if(isPhaseWorkout(phases)){
@@ -1464,10 +1584,16 @@ async function applyOcrToRecord(rec){
     if(splits.length>=2){
       rec.splits = splits; changed = true;
       const tot = splitsTotals(splits);
+      if(rec.distanceKm==null && tot.distanceKm) rec.distanceKm = tot.distanceKm;
+      else if(rec.distanceKm!=null && tot.distanceKm && Math.abs(rec.distanceKm-Math.round(rec.distanceKm))<=0.02
+        && Math.abs(tot.distanceKm-rec.distanceKm)>0.04 && tot.distanceKm<rec.distanceKm+1.2){
+        rec.distanceKm = tot.distanceKm;
+      }
       if(rec.avgHr==null && tot.avgHr!=null) rec.avgHr = tot.avgHr;
       if(rec.cadence==null && tot.cadence!=null) rec.cadence = tot.cadence;
     }
   }
+  reconcileRunMetrics(rec, text);
   if(text){ rec.ocrText = text.slice(0, 8000); changed = true; }
   if(changed){
     rec.type = classifyRun({distanceKm:rec.distanceKm, durationSec:rec.durationSec, avgPaceSec:rec.avgPaceSec, avgHr:rec.avgHr, phases:rec.phases, hint:(rec.notes||'')+' '+(rec.fileName||'')+' '+text}) || rec.type;
@@ -1892,13 +2018,22 @@ function mergeImageGroup(group){
   const dists = ps.map(p=>p.distanceKm).filter(v=>v!=null);
   const durs  = ps.map(p=>p.durationSec).filter(v=>v!=null);
   // 총거리/총시간은 요약(primary) 값을 신뢰, 없으면 최댓값
-  const distanceKm  = primary.p.distanceKm!=null ? primary.p.distanceKm : (dists.length? Math.max(...dists):null);
+  let distanceKm  = primary.p.distanceKm!=null ? primary.p.distanceKm : (dists.length? Math.max(...dists):null);
+  if(dists.length){
+    const better = pickBestDistance(dists);
+    if(better && (distanceKm==null || (Math.abs(distanceKm-Math.round(distanceKm))<=0.02 && Math.abs(better-Math.round(better))>0.02))){
+      distanceKm = better;
+    }
+  }
   const durationSec = primary.p.durationSec!=null ? primary.p.durationSec : (durs.length? Math.max(...durs):null);
   const pick = (f)=> primary.p[f]!=null ? primary.p[f] : median(ps.map(p=>p[f])); // 요약값 우선
   let avgPaceSec = pick('avgPaceSec');
   const avgHr = pick('avgHr'), cadence = pick('cadence');
   if(distanceKm && durationSec && !avgPaceSec) avgPaceSec = durationSec/distanceKm;
-  const iso = group.map(g=>g.iso).find(Boolean) || new Date().toISOString();
+  const mtime = group.map(g=>g.mtime).find(v=>v!=null) || null;
+  const iso = group.map(g=>g.iso).find(Boolean)
+    || parseDateFromFileName(primary.fileName)
+    || (mtime ? new Date(mtime).toISOString() : new Date().toISOString());
   const splitsItem = group.filter(g=>g.splits && g.splits.length>=2)
     .sort((a,b)=>{
       const score = (sp)=> sp.reduce((s,x)=>s+(x.hr!=null?1:0)+(x.cad!=null?1:0),0);
@@ -1907,7 +2042,6 @@ function mergeImageGroup(group){
   const splits = splitsItem ? splitsItem.splits : null;
   const phasesItem = group.find(g=>g.phases && g.phases.length>=3);
   const phases = phasesItem ? phasesItem.phases : null;
-  const mtime = group.map(g=>g.mtime).find(v=>v!=null) || null;
   const firstOf = (f)=>{ for(const g of group){ if(g.p[f]!=null) return g.p[f]; } return null; }; // 범위(세부사항) 값
   const hrMin=firstOf('hrMin'), hrMax=firstOf('hrMax'), cadMin=firstOf('cadMin'), cadMax=firstOf('cadMax'),
         paceFast=firstOf('paceFast'), paceSlow=firstOf('paceSlow');
@@ -2134,6 +2268,9 @@ async function buildImageItem(dataUrl, fileName, mtime, ocrReady){
     // 요약 거리가 있으면 절대 구간 합으로 덮지 않음 (1.11km가 5.00km 되는 원인)
     if(p.distanceKm==null && tot.distanceKm && !(p.avgPaceSec && tot.distanceKm>3 && (tot.durationSec||0)<15*60)){
       p.distanceKm = tot.distanceKm;
+    } else if(p.distanceKm!=null && tot.distanceKm && Math.abs(p.distanceKm-Math.round(p.distanceKm))<=0.02
+      && Math.abs(tot.distanceKm-p.distanceKm)>0.04 && tot.distanceKm<p.distanceKm+1.2){
+      p.distanceKm = tot.distanceKm;
     }
     if(p.durationSec==null && tot.durationSec && tot.durationSec>=p.distanceKm*150) p.durationSec = tot.durationSec;
     if(p.avgPaceSec==null) p.avgPaceSec = tot.avgPaceSec;
@@ -2143,8 +2280,8 @@ async function buildImageItem(dataUrl, fileName, mtime, ocrReady){
       && /스\s*플\s*릿|split/i.test(text||'')){
     p.distanceKm = null;
   }
-  reconcileRunMetrics(p);
-  return { dataUrl, fileName:fileName||'', text, p, iso:parseDateFromText(text||''),
+  reconcileRunMetrics(p, text||'');
+  return { dataUrl, fileName:fileName||'', text, p, iso:parseDateFromText(text||'') || parseDateFromFileName(fileName),
            splits: (!isPhase && splits.length>=2) ? splits : null,
            phases: isPhase ? phases : null, isSplit, mtime: mtime||null };
 }
@@ -4836,4 +4973,7 @@ window.ocrImage = ocrImage;
 window.ensureOCR = ensureOCR;
 window.extractRunFromImage = extractRunFromImage;
 window.parseFromWords = parseFromWords;
+window.parseDateFromText = parseDateFromText;
+window.classifyMssRow = classifyMssRow;
+window.pickBestDistance = pickBestDistance;
 if(!window.RC_TEST) boot();

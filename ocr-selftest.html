@@ -8,7 +8,7 @@ body{font-family:sans-serif;background:#111;color:#eee;padding:16px}
 <h2>OCR 파서 셀프테스트</h2>
 <div id="out">로딩…</div>
 <script>window.RC_TEST = true;</script>
-<script src="app.js?v=36"></script>
+<script src="app.js?v=37"></script>
 <script>
 const cases = [
   {
@@ -48,6 +48,7 @@ const cases = [
       cadence: 182, cadMax: 192, calories: 95, strideCm: 103, gctMs: 177,
       flightMs: 110, flightMaxMs: 116, vertOscCm: 7.6, ascentM: 1, descentM: 1
     },
+    dateDay: 15,
     splits: 2,
     grade: { flat: 99 }
   },
@@ -97,7 +98,7 @@ const cases = [
     splits: 3
   },
   {
-    name: 'Amazfit 공유카드 (페이스만 있고 운동시간 없음)',
+    name: 'Amazfit 공유카드 (05\'48"은 시간, 05\'10"이 평균페이스)',
     text: `야외 달리기
 hs Jung
 8월 15일 17:49
@@ -105,7 +106,33 @@ Amazfit Active 3 Premium
 1.11 km
 05'48"  05'10"  05'12"
 29°C 68%`,
-    expect: { distanceKm: 1.11, durationSec: [370, 400], avgPaceSec: 348, avgHr: null, calories: null }
+    expect: { distanceKm: 1.11, durationSec: [340, 360], avgPaceSec: 310, avgHr: null, calories: null },
+    dateDay: 15
+  },
+  {
+    name: '구간 1.00+0.11만 있어도 총거리 1.11',
+    text: `8월 15일 17:49
+구간별 기록
+1.00 km 05'32"
+0.11 km 05'49"`,
+    expect: { distanceKm: 1.11 },
+    dateDay: 15,
+    splits: 2
+  },
+  {
+    name: '17:49를 일자 17로 쓰면 안 됨',
+    text: `8월 15일 17:49
+1.11 km
+05'48"  05'10"  05'12"`,
+    expect: { distanceKm: 1.11, avgPaceSec: 310 },
+    dateDay: 15
+  },
+  {
+    name: 'OCR 월 l5일 → 15일',
+    text: `8월 l5일 17:49
+1.11 km`,
+    expect: { distanceKm: 1.11 },
+    dateDay: 15
   },
   {
     name: 'OCR 깨짐 kn/kca1/O6:11/습도',
@@ -253,6 +280,18 @@ const wordCases = [
       { t:'05.46.05', x:40, y:120, x1:200, y1:160 }
     ],
     expect: { distanceKm: 1.11 }
+  },
+  {
+    name: '좌표 파싱: 1.00과 0.11이면 1.11',
+    words: [
+      { t:'1.00', x:40, y:200, x1:120, y1:230 },
+      { t:'km', x:130, y:205, x1:170, y1:225 },
+      { t:'0.11', x:40, y:250, x1:120, y1:280 },
+      { t:'km', x:130, y:255, x1:170, y1:275 },
+      { t:'1.11', x:40, y:20, x1:180, y1:90 },
+      { t:'km', x:190, y:40, x1:240, y1:70 }
+    ],
+    expect: { distanceKm: 1.11 }
   }
 ];
 
@@ -277,6 +316,11 @@ for(const c of cases){
   if(c.name.includes('1.11') && p.distanceKm>=3) miss.push('거리가 3km 이상으로 부풀음');
   if(c.name.includes('17:49') && p.durationSec && p.durationSec>800) miss.push('17:49를 운동시간으로 읽음');
   if(c.splits!=null && sp.length!==c.splits) miss.push(`구간 ${sp.length} (원함 ${c.splits})`);
+  if(c.dateDay!=null){
+    const iso = parseDateFromText(c.text || '');
+    const day = iso ? +iso.slice(8,10) : null;
+    if(day!==c.dateDay) miss.push(`일자 ${day} (원함 ${c.dateDay}, iso=${iso})`);
+  }
   if(c.grade){
     Object.keys(c.grade).forEach(k=>{
       const got = gd && gd[k] && gd[k].pct;
