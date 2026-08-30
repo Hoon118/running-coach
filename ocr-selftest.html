@@ -8,7 +8,7 @@ body{font-family:sans-serif;background:#111;color:#eee;padding:16px}
 <h2>OCR 파서 셀프테스트</h2>
 <div id="out">로딩…</div>
 <script>window.RC_TEST = true;</script>
-<script src="app.js?v=38"></script>
+<script src="app.js?v=39"></script>
 <script>
 const cases = [
   {
@@ -252,6 +252,49 @@ VO2 Max 55
 79 kcal
 174 rpm`,
     expect: { distanceKm: 1.11, durationSec: [340, 360], avgHr: 166, cadence: 174, calories: 79 }
+  },
+  {
+    name: 'Zepp PDF 라벨 카드: 총거리 1.11 / 운동시간 05:48 / 평균페이스 5\'13"',
+    text: `8월 15일 11:44
+야외 달리기
+Amazfit Active 3 Premium
+거리
+1.11
+킬로미터
+운동 시간
+05:48
+평균 페이스
+05'13"
+평균 심박수
+166
+소모량
+73
+평균 케이던스
+174
+페이스
+05'13"  04'50"
+심박수
+166 bpm  174 bpm
+케이던스
+174 spm  181 spm
+보폭
+111 cm  116 cm
+지면 접촉 시간
+253 ms  233 ms
+수직 진폭
+7.8 cm
+파워 343 W
+구간별 상세정보
+1.00 km 05'03" 165
+0.11 km 07'03" 168
+예상 10K
+58:42
+10.00 km`,
+    expect: {
+      distanceKm: 1.11, durationSec: 348, avgPaceSec: 313, avgHr: 166,
+      cadence: 174, calories: 73, strideCm: 111, gctMs: 253, avgPowerW: 343
+    },
+    splits: 2
   }
 ];
 
