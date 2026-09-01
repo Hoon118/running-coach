@@ -6,7 +6,7 @@
 'use strict';
 
 /* 앱 버전 (sw.js 캐시 버전과 동일하게 유지) */
-const APP_VERSION = 'v39';
+const APP_VERSION = 'v40';
 
 /* ---------- 세션 타입 정의 ---------- */
 const TYPES = {
@@ -2056,58 +2056,93 @@ function parseFIT(buf){
       }
     }
 
-    // Session 우선, 없으면 Lap/Record 합산
-    let distM=null, durSec=null, avgHr=null, cadence=null, startMs=null, sport=null, calories=null, gctMs=null;
-    const applySession = (s)=>{
-      if(!s) return;
+    // ── 헬퍼: 러닝 케이던스는 FIT에 rpm으로 저장됨 → spm = rpm × 2 ──
+    const toSpm = (v)=> (v!=null && v>0) ? Math.round(v*2) : null;
+    const pos = (v)=> (v!=null && Number.isFinite(v) && v>0) ? v : null;
+
+    // ── 세션(전체 요약): FIT Session(global 18) 표준 필드번호 ──
+    let distM=null, durSec=null, avgHr=null, cadence=null, startMs=null, sport=null, calories=null,
+        hrMax=null, hrMin=null, cadMax=null, ascentM=null, descentM=null,
+        avgSpeedMps=null, maxSpeedMps=null, avgPowerW=null, maxPowerW=null,
+        teAerobic=null, teAnaerobic=null, strideCm=null, numLaps=null;
+    if(session){
+      const s = session;
       if(s[5]!=null) sport = s[5];
       if(s[2]!=null) startMs = FIT_EPOCH_MS + s[2]*1000;
-      // total_timer_time / total_elapsed_time: scale 1000
-      const tTimer = s[8]!=null ? s[8]/1000 : null;
-      const tElap  = s[7]!=null ? s[7]/1000 : null;
+      const tTimer = s[8]!=null ? s[8]/1000 : null;   // total_timer_time (scale 1000)
+      const tElap  = s[7]!=null ? s[7]/1000 : null;   // total_elapsed_time
       durSec = tTimer || tElap;
-      if(s[9]!=null) distM = s[9]/100; // scale 100 → meters
-      if(s[16]!=null) avgHr = s[16];
-      // avg_running_cadence(21) 우선, 없으면 avg_cadence(17)
-      if(s[21]!=null) cadence = s[21];
-      else if(s[17]!=null){
-        cadence = s[17];
-        if(sport===1 || sport===11 || cadence < 90) cadence = Math.round(cadence * 2);
+      if(s[9]!=null)   distM   = s[9]/100;            // total_distance (scale 100 → m)
+      if(s[16]!=null)  avgHr   = s[16];               // avg_heart_rate
+      if(s[17]!=null)  hrMax   = s[17];               // max_heart_rate
+      if(s[64]!=null)  hrMin   = s[64];               // min_heart_rate
+      if(s[18]!=null)  cadence = toSpm(s[18]);        // avg_cadence(rpm) → spm
+      if(s[19]!=null)  cadMax  = toSpm(s[19]);        // max_cadence(rpm) → spm
+      if(s[11]!=null)  calories= s[11];               // total_calories
+      if(s[22]!=null)  ascentM = s[22];               // total_ascent
+      if(s[23]!=null)  descentM= s[23];               // total_descent
+      if(s[20]!=null)  avgPowerW = s[20];             // avg_power
+      if(s[21]!=null)  maxPowerW = s[21];             // max_power
+      if(s[24]!=null)  teAerobic = +(s[24]/10).toFixed(1);      // total_training_effect (scale 10)
+      if(s[137]!=null) teAnaerobic = +(s[137]/10).toFixed(1);   // total_anaerobic_training_effect
+      if(s[26]!=null)  numLaps = s[26];               // num_laps
+      if(s[124]!=null) avgSpeedMps = s[124]/1000;     // enhanced_avg_speed
+      else if(s[14]!=null) avgSpeedMps = s[14]/1000;  // avg_speed
+      if(s[125]!=null) maxSpeedMps = s[125]/1000;     // enhanced_max_speed
+      else if(s[15]!=null) maxSpeedMps = s[15]/1000;  // max_speed
+      if(s[9]!=null && s[8]!=null && cadence>0){      // 세션 보폭 추정치(mm→cm 필드가 없을 때)
+        const cyc = (s[8]/1000/60) * (cadence/2);     // 총 회전수 ≈ 분 × rpm
+        if(cyc>0) strideCm = Math.round((s[9]/100)/cyc*100);
       }
-      if(s[11]!=null) calories = s[11]; // total_calories
-      if(s[89]!=null) gctMs = Math.round(s[89]/10); // avg_stance_time scale 10
-    };
-    applySession(session);
-    if((distM==null || !(distM>0)) && laps.length){
-      let d=0, t=0, hrS=0, hrN=0, cadS=0, cadN=0;
-      laps.forEach(l=>{
-        if(l[9]!=null) d += l[9]/100;
-        if(l[8]!=null) t += l[8]/1000;
-        else if(l[7]!=null) t += l[7]/1000;
-        if(l[16]!=null){ hrS+=l[16]; hrN++; }
-        if(l[21]!=null){ cadS+=l[21]; cadN++; }
-        else if(l[17]!=null){ cadS+=l[17]*2; cadN++; }
-        if(startMs==null && l[2]!=null) startMs = FIT_EPOCH_MS + l[2]*1000;
-      });
-      if(d>0) distM = d;
-      if(t>0) durSec = t;
-      if(avgHr==null && hrN) avgHr = Math.round(hrS/hrN);
-      if(cadence==null && cadN) cadence = Math.round(cadS/cadN);
     }
+
+    // ── 랩(구간별 상세): FIT Lap(global 19) 표준 필드번호 ──
+    const lapData = laps.map(l=>{
+      const dm = l[9]!=null ? l[9]/100 : null;        // total_distance (m)
+      const ts = l[8]!=null ? l[8]/1000 : (l[7]!=null ? l[7]/1000 : null); // timer → elapsed
+      const km = dm!=null ? dm/1000 : null;
+      const pace = (km>0 && ts>0) ? Math.round(ts/km) : null;
+      const spd  = (km>0 && ts>0) ? +(km/(ts/3600)).toFixed(2) : null;     // km/h (시간·거리 기반, 견고)
+      return {
+        km:  km!=null ? +km.toFixed(3) : null,
+        tSec: ts!=null ? Math.round(ts) : null,
+        pace,
+        hr:   pos(l[15]),          // avg_heart_rate (랩은 15!)
+        maxHr:pos(l[16]),          // max_heart_rate
+        cad:  toSpm(l[17]),        // avg_cadence(rpm) → spm (랩은 17!)
+        maxCad: toSpm(l[18]),      // max_cadence(rpm) → spm
+        speedKmh: spd,
+        calories: pos(l[11]),
+        ascent:  (l[21]!=null ? l[21] : null),
+        descent: (l[22]!=null ? l[22] : null)
+      };
+    }).filter(x=> x.tSec!=null && x.km!=null && x.km>0);
+
+    // 세션 값이 비면 랩 합산으로 보완(가중평균)
+    if((distM==null || !(distM>0)) && lapData.length){
+      const d = lapData.reduce((s,x)=>s+x.km*1000,0); if(d>0) distM = d;
+    }
+    if((durSec==null || !(durSec>0)) && lapData.length){
+      const t = lapData.reduce((s,x)=>s+(x.tSec||0),0); if(t>0) durSec = t;
+    }
+    const wavgLap = (key)=>{ const w=lapData.filter(x=>x[key]!=null); const T=w.reduce((s,x)=>s+x.tSec,0);
+      return T? Math.round(w.reduce((s,x)=>s+x[key]*x.tSec,0)/T):null; };
+    if(avgHr==null)   avgHr   = wavgLap('hr');
+    if(cadence==null) cadence = wavgLap('cad');
+    if(hrMax==null && lapData.some(x=>x.maxHr!=null))  hrMax  = Math.max(...lapData.filter(x=>x.maxHr!=null).map(x=>x.maxHr));
+    if(cadMax==null && lapData.some(x=>x.maxCad!=null)) cadMax = Math.max(...lapData.filter(x=>x.maxCad!=null).map(x=>x.maxCad));
+    if(startMs==null && laps[0] && laps[0][2]!=null) startMs = FIT_EPOCH_MS + laps[0][2]*1000;
+
+    // 레코드(초 단위) 폴백: 세션·랩 모두 비었을 때만
     if((distM==null || !(distM>0) || durSec==null) && records.length >= 2){
       const semi = (v)=> v==null?null: v * (180 / 0x80000000);
-      let last=null, trackDist=0, maxDistField=0;
+      let last=null, trackDist=0, maxDistField=0, tFirst=null, tLast=null;
       const hrs=[], cads=[];
-      let tFirst=null, tLast=null;
       records.forEach(r=>{
         if(r[253]!=null){ if(tFirst==null) tFirst=r[253]; tLast=r[253]; }
         if(r[5]!=null) maxDistField = Math.max(maxDistField, r[5]/100);
         const lat = semi(r[0]), lon = semi(r[1]);
-        if(lat!=null && lon!=null){
-          const p={lat,lon};
-          if(last) trackDist += haversine(last, p);
-          last = p;
-        }
+        if(lat!=null && lon!=null){ const p={lat,lon}; if(last) trackDist += haversine(last, p); last = p; }
         if(r[3]!=null) hrs.push(r[3]);
         if(r[4]!=null) cads.push(r[4]);
       });
@@ -2115,24 +2150,34 @@ function parseFIT(buf){
       if(!(durSec>0) && tFirst!=null && tLast!=null) durSec = tLast - tFirst;
       if(startMs==null && tFirst!=null) startMs = FIT_EPOCH_MS + tFirst*1000;
       if(avgHr==null && hrs.length) avgHr = Math.round(hrs.reduce((a,b)=>a+b,0)/hrs.length);
-      if(cadence==null && cads.length){
-        let c = Math.round(cads.reduce((a,b)=>a+b,0)/cads.length);
-        if(c < 90) c *= 2;
-        cadence = c;
-      }
+      if(cadence==null && cads.length) cadence = toSpm(Math.round(cads.reduce((a,b)=>a+b,0)/cads.length));
     }
+
     const km = distM!=null ? distM/1000 : null;
     if(!(km>0.01) && !(durSec>0)) return null;
-    return {
+    const out = {
       distanceKm: km>0 ? +km.toFixed(2) : null,
       durationSec: durSec>0 ? Math.round(durSec) : null,
       avgPaceSec: (durSec>0 && km>0) ? durSec/km : null,
-      avgHr: avgHr>0 ? avgHr : null,
-      cadence: cadence>0 ? cadence : null,
+      avgHr: pos(avgHr),
+      cadence: pos(cadence),
       calories: calories>0 ? Math.round(calories) : null,
-      gctMs: gctMs>0 ? gctMs : null,
       date: startMs ? new Date(startMs).toISOString() : new Date().toISOString()
     };
+    if(pos(hrMax)) out.hrMax = hrMax;
+    if(pos(hrMin)) out.hrMin = hrMin;
+    if(pos(cadMax)) out.cadMax = cadMax;
+    if(ascentM!=null && ascentM>=0)  out.ascentM = Math.round(ascentM);
+    if(descentM!=null && descentM>=0) out.descentM = Math.round(descentM);
+    if(pos(avgPowerW)) out.avgPowerW = Math.round(avgPowerW);
+    if(pos(maxPowerW)) out.maxPowerW = Math.round(maxPowerW);
+    if(teAerobic!=null && teAerobic>0)   out.teAerobic = teAerobic;
+    if(teAnaerobic!=null && teAnaerobic>0) out.teAnaerobic = teAnaerobic;
+    if(pos(avgSpeedMps)) out.avgSpeedKmh = +(avgSpeedMps*3.6).toFixed(1);
+    if(pos(maxSpeedMps)) out.maxSpeedKmh = +(maxSpeedMps*3.6).toFixed(1);
+    if(strideCm>30 && strideCm<250) out.strideCm = strideCm;
+    if(lapData.length>=2){ out.splits = lapData; out.lapCount = lapData.length; }
+    return out;
   }catch(e){ return null; }
 }
 
@@ -2142,6 +2187,91 @@ function isFitBuffer(buf){
     if(u8.length < 12) return false;
     return u8[8]===0x2E && u8[9]===0x46 && u8[10]===0x49 && u8[11]===0x54; // .FIT
   }catch(e){ return false; }
+}
+
+/* ── FIT 리더가 내보낸 CSV(세션/랩) 파싱 · Zepp/Amazfit ── */
+function parseKFitDate(str){
+  if(!str) return null;
+  // "2026. 09. 01. 오후 09:37:38" (한글 오전/오후) 또는 ISO
+  const m = str.match(/(\d{4})\D+(\d{1,2})\D+(\d{1,2})\D+(오전|오후|AM|PM)?\s*(\d{1,2}):(\d{2}):(\d{2})/i);
+  if(!m){ const d = new Date(str); return isNaN(d)?null:d.toISOString(); }
+  let Y=+m[1], Mo=+m[2], D=+m[3], ap=m[4], h=+m[5], mi=+m[6], s=+m[7];
+  if(/오후|PM/i.test(ap||'') && h<12) h+=12;
+  if(/오전|AM/i.test(ap||'') && h===12) h=0;
+  const d = new Date(Y, Mo-1, D, h, mi, s);
+  return isNaN(d)?null:d.toISOString();
+}
+function parseCSVText(text){
+  const lines = text.replace(/\r/g,'').split('\n').filter(l=>l.trim().length);
+  if(lines.length < 2) return null;
+  const header = lines[0].split(',').map(h=>h.trim());
+  const rows = lines.slice(1).map(l=>l.split(','));
+  return { header, rows };
+}
+/* CSV → 기록(세션=요약 / 랩=구간별 상세). 케이던스 rpm→spm(×2) */
+function parseZeppCSV(text){
+  const csv = parseCSVText(text); if(!csv) return null;
+  const H = csv.header, idx = (n)=> H.indexOf(n), has = (n)=> idx(n)>=0;
+  const isSession = has('num_laps') || has('total_training_effect') || has('training_load_peak');
+  const isLap = !isSession && (has('lap_trigger') || has('start_position_lat') || has('message_index'));
+  if(!isSession && !isLap) return null;
+  const num = (row,n)=>{ const i=idx(n); if(i<0) return null; const v=parseFloat((row[i]||'').trim()); return Number.isFinite(v)?v:null; };
+  const str = (row,n)=>{ const i=idx(n); return i<0?null:(row[i]||'').trim(); };
+  const spm = (v)=> (v!=null && v>0) ? Math.round(v*2) : null;   // rpm → spm
+
+  if(isSession){
+    const r = csv.rows[0];
+    const distM = num(r,'total_distance');
+    const dur = num(r,'total_timer_time') || num(r,'total_elapsed_time');
+    const km = distM!=null ? distM/1000 : null;
+    const spd = num(r,'enhanced_avg_speed'); const spd2 = num(r,'avg_speed');
+    const mspd = num(r,'enhanced_max_speed'); const mspd2 = num(r,'max_speed');
+    const out = {
+      distanceKm: km>0 ? +km.toFixed(2) : null,
+      durationSec: dur>0 ? Math.round(dur) : null,
+      avgPaceSec: (dur>0 && km>0) ? dur/km : null,
+      avgHr: num(r,'avg_heart_rate'),
+      cadence: spm(num(r,'avg_cadence')),
+      calories: num(r,'total_calories'),
+      date: parseKFitDate(str(r,'start_time')) || parseKFitDate(str(r,'timestamp')) || new Date().toISOString(),
+      _csvKind:'session'
+    };
+    const mhr=num(r,'max_heart_rate'), mnhr=num(r,'min_heart_rate'), mcad=num(r,'max_cadence');
+    if(mhr>0) out.hrMax=mhr; if(mnhr>0) out.hrMin=mnhr; if(mcad>0) out.cadMax=spm(mcad);
+    const asc=num(r,'total_ascent'), desc=num(r,'total_descent');
+    if(asc!=null&&asc>=0) out.ascentM=Math.round(asc); if(desc!=null&&desc>=0) out.descentM=Math.round(desc);
+    const s = (spd!=null?spd:spd2), ms=(mspd!=null?mspd:mspd2);
+    if(s>0) out.avgSpeedKmh=+(s*3.6).toFixed(1); if(ms>0) out.maxSpeedKmh=+(ms*3.6).toFixed(1);
+    const te=num(r,'total_training_effect'), tae=num(r,'total_anaerobic_training_effect');
+    if(te>0) out.teAerobic=+te.toFixed(1); if(tae>0) out.teAnaerobic=+tae.toFixed(1);
+    const ap=num(r,'avg_power'), mp=num(r,'max_power');
+    if(ap>0) out.avgPowerW=Math.round(ap); if(mp>0) out.maxPowerW=Math.round(mp);
+    const sl=num(r,'avg_step_length'); if(sl>0) out.strideCm=Math.round(sl/10); // mm→cm
+    return out;
+  }
+  // Lap: 각 행 = 한 구간
+  const laps = csv.rows.map(r=>{
+    const dm=num(r,'total_distance'); const ts=num(r,'total_timer_time') || num(r,'total_elapsed_time');
+    const km=dm!=null?dm/1000:null; const pace=(km>0&&ts>0)?Math.round(ts/km):null;
+    const spd=num(r,'enhanced_avg_speed'); const spd2=num(r,'avg_speed'); const s=(spd!=null?spd:spd2);
+    return {
+      km: km!=null?+km.toFixed(3):null, tSec: ts!=null?Math.round(ts):null, pace,
+      hr:num(r,'avg_heart_rate'), maxHr:num(r,'max_heart_rate'),
+      cad:spm(num(r,'avg_cadence')), maxCad:spm(num(r,'max_cadence')),
+      speedKmh: s>0?+(s*3.6).toFixed(2):null, calories:num(r,'total_calories'),
+      ascent:num(r,'total_ascent'), descent:num(r,'total_descent')
+    };
+  }).filter(x=> x.tSec!=null && x.km!=null && x.km>0);
+  if(!laps.length) return null;
+  const totalKm = laps.reduce((s,x)=>s+x.km,0), totalT = laps.reduce((s,x)=>s+x.tSec,0);
+  const wavg=(k)=>{ const w=laps.filter(x=>x[k]!=null); const T=w.reduce((s,x)=>s+x.tSec,0); return T?Math.round(w.reduce((s,x)=>s+x[k]*x.tSec,0)/T):null; };
+  return {
+    distanceKm:+totalKm.toFixed(2), durationSec:totalT,
+    avgPaceSec: totalKm>0 ? totalT/totalKm : null,
+    avgHr:wavg('hr'), cadence:wavg('cad'),
+    date: parseKFitDate(str(csv.rows[0],'start_time')) || parseKFitDate(str(csv.rows[0],'timestamp')) || new Date().toISOString(),
+    splits:laps, lapCount:laps.length, _csvKind:'lap'
+  };
 }
 
 /* 파일 → 기록 후보 */
@@ -2168,7 +2298,15 @@ async function fileToRecord(file){
     applyParsed(parseTCX(await file.text()), 'TCX');
   } else if(/\.(fit)$/i.test(lower) || mime==='application/fit' || mime.endsWith('/fit')){
     applyParsed(parseFIT(await file.arrayBuffer()), 'FIT');
-  } else if(/\.(txt|csv)$/i.test(lower)){
+  } else if(/\.(csv)$/i.test(lower)){
+    const txt = await file.text();
+    const z = parseZeppCSV(txt);
+    if(z){ delete z._csvKind; applyParsed(z, 'FIT CSV'); }
+    else { const p = parseTextMetrics(txt);
+      Object.assign(base, {distanceKm:p.distanceKm||null, durationSec:p.durationSec||null,
+        avgPaceSec:p.avgPaceSec||null, avgHr:p.avgHr||null, cadence:p.cadence||null,
+        type:classifyRun({...p, hint:txt+' '+name})}); }
+  } else if(/\.(txt)$/i.test(lower)){
     const txt = await file.text(); const p = parseTextMetrics(txt);
     Object.assign(base, {distanceKm:p.distanceKm||null, durationSec:p.durationSec||null,
       avgPaceSec:p.avgPaceSec||null, avgHr:p.avgHr||null, cadence:p.cadence||null,
@@ -2488,9 +2626,39 @@ async function handleFiles(files){
   const others = arr.filter(f=> !(f.type||'').startsWith('image/'));
   let added = 0;
 
-  // 1) 비이미지(GPX/TCX/FIT/TXT): Amazfit·Zepp 내보내기 포함
+  // 1) 비이미지(GPX/TCX/FIT/CSV/TXT): Amazfit·Zepp 내보내기 포함
   let fileOk = 0, fileBad = 0;
+
+  // 1-a) Zepp/FIT CSV: 같은 접두어의 session+lap을 한 기록으로 짝짓기
+  const csvPairs = {}; const otherFiles = [];
   for(const f of others){
+    const m = (f.name||'').match(/^(.*?)[-_]?(session|lap)\.csv$/i);
+    if(m){ const key=m[1]; (csvPairs[key]=csvPairs[key]||{})[m[2].toLowerCase()] = f; }
+    else otherFiles.push(f);
+  }
+  for(const key in csvPairs){
+    const pair = csvPairs[key];
+    let sess=null, lap=null;
+    try{ if(pair.session) sess = parseZeppCSV(await pair.session.text()); }catch(e){}
+    try{ if(pair.lap)     lap  = parseZeppCSV(await pair.lap.text()); }catch(e){}
+    if(!sess && !lap){ // 파싱 실패 → 개별 파일로 폴백
+      if(pair.session) otherFiles.push(pair.session);
+      if(pair.lap) otherFiles.push(pair.lap);
+      continue;
+    }
+    const merged = Object.assign({}, lap||{}, sess||{});   // 세션 요약 우선
+    if(lap && lap.splits){ merged.splits = lap.splits; merged.lapCount = lap.lapCount; } // 구간 상세는 랩에서
+    delete merged._csvKind;
+    const rec = { id:uid(), source:'file', fileName:(key||'zepp')+' (FIT CSV)',
+                  notes:'Amazfit/Zepp · FIT CSV(세션+랩)', autoType:true,
+                  date: merged.date || new Date().toISOString() };
+    Object.assign(rec, merged, { type: classifyRun({ ...merged, hint:'zepp amazfit active running' }) });
+    if(!(rec.distanceKm>0) || !(rec.durationSec>0)) rec.needsReview = true;
+    await DB.put('records', rec); state.records.push(rec); added++;
+    if(rec.distanceKm>0 && rec.durationSec>0) fileOk++; else fileBad++;
+  }
+
+  for(const f of otherFiles){
     const rec = await fileToRecord(f);
     await DB.put('records', rec); state.records.push(rec); added++;
     if(rec.distanceKm>0 && rec.durationSec>0) fileOk++; else fileBad++;

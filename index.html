@@ -329,7 +329,7 @@ canvas.chart{width:100%;height:150px;display:block}
     </div>
     <div class="card">
       <h2>러닝 기록 첨부 & 학습</h2>
-      <div class="desc">Zepp <b>GPX · TCX · FIT</b> 또는 긴 스크린샷에서 심박영역·지면접촉 등 상세 지표까지 읽어 플랜에 반영합니다.</div>
+      <div class="desc">Zepp <b>FIT · CSV(세션+랩) · GPX · TCX</b>를 올리면 <b>랩별 페이스·심박·케이던스·속도</b>까지 정확히 기록합니다(이미지보다 정확). 케이던스는 rpm→spm 자동 변환.</div>
       <div class="grid2">
         <label class="btn" for="fileInput" id="btnAddFile" style="cursor:pointer;margin:0">📎 파일 첨부</label>
         <button class="btn" id="btnAddManual" type="button">✏️ 직접 입력</button>
@@ -338,7 +338,7 @@ canvas.chart{width:100%;height:150px;display:block}
       <label class="btn primary block" for="imgImportInput" id="btnImportWorkout" style="margin-top:10px;cursor:pointer">📥 운동 기록 불러오기</label>
       <input type="file" id="imgImportInput" accept="image/*" multiple class="file-hidden" />
       <button class="btn block" id="btnOcrAll" type="button" style="margin-top:10px">🔍 이미지 기록 전부 다시 인식</button>
-      <div class="note"><b>운동 기록 불러오기:</b> Zepp 긴 스크린샷(심박영역·지면접촉·보폭 등)을 올리면 OCR로 상세 수치를 채웁니다. <b>파일 첨부</b>는 GPX/TCX/FIT 워치 내보내기용입니다.</div>
+      <div class="note"><b>파일 첨부(권장):</b> Zepp/워치의 <b>.fit</b> 파일 또는 FIT 리더 CSV(session·lap)를 올리면 세션·랩 데이터를 그대로 정확히 기록합니다. <b>운동 기록 불러오기</b>는 스크린샷 OCR용(정확도 낮음)입니다.</div>
     </div>
     <div style="display:flex;justify-content:space-between;align-items:center;margin:4px 2px 10px">
       <div class="sectitle" style="margin:0">기록 목록 <span id="recCount" style="color:var(--acc)"></span></div>
