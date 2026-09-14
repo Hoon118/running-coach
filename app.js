@@ -6,7 +6,7 @@
 'use strict';
 
 /* 앱 버전 (sw.js 캐시 버전과 동일하게 유지) */
-const APP_VERSION = 'v41';
+const APP_VERSION = 'v42';
 
 /* ---------- 세션 타입 정의 ---------- */
 const TYPES = {
@@ -3878,7 +3878,7 @@ function openTrainingEditor(opt={}){
       warmMin:parseFloat($('#tr_warm').value)||0,coolMin:parseFloat($('#tr_cool').value)||0};
     const di=+$('#tr_day').value;
     plan.sessions[di]=buildCustomSession(v);
-    plan.editedAt=Date.now(); plan.note=(plan.note||'')+' · 사용자 편집';
+    plan.editedAt=Date.now(); plan.customized=true; plan.note=(plan.note||'')+' · 사용자 편집';
     plan.target=Math.round(plan.sessions.reduce((s,x)=>s+(x.km||0),0));
     await DB.put('plans',plan); state.plans[plan.weekStart]=plan;
     closeSheet(); renderPlan(); renderHome(); toast(`${['월','화','수','목','금','토','일'][di]}요일 훈련 적용됨`);
@@ -4049,7 +4049,9 @@ function estWorkoutKm(w){
   return +km.toFixed(1);
 }
 
-function generatePlan(monday){
+function generatePlan(monday, force=false){
+  const existing=getPlan(monday);
+  if(existing?.customized && !force) return existing;
   if(state.settings.planStyle==='mixed') return generateMixedPlan(monday);
   const m = state.metrics;
   const base = (m.chronicWeekly>5)? m.chronicWeekly : state.settings.weeklyGoalKm;
@@ -4155,7 +4157,7 @@ function renderPlan(){
     box.innerHTML = `<div class="card"><div class="empty"><div class="big">🤖</div>
       ${m.count?'기록을 학습해 이번 주 플랜을 만들 수 있어요.':'먼저 러닝 기록을 첨부해 주세요.'}<br>
       <button class="btn primary sm" style="margin-top:12px" id="genNow">플랜 생성</button></div></div>`;
-    const g = $('#genNow'); if(g) g.onclick = async()=>{ generatePlan(monday); await syncPlansWithRecords(); renderPlan(); toast('플랜 생성됨'); };
+    const g = $('#genNow'); if(g) g.onclick = async()=>{ generatePlan(monday,true); await syncPlansWithRecords(); renderPlan(); toast('플랜 생성됨'); };
     return;
   }
   const days = ['월','화','수','목','금','토','일'];
@@ -4197,7 +4199,7 @@ function renderPlan(){
     const from=+el.dataset.moveSession, to=+el.value;
     if(from===to) return;
     [plan.sessions[from],plan.sessions[to]]=[plan.sessions[to],plan.sessions[from]];
-    plan.editedAt=Date.now();
+    plan.editedAt=Date.now(); plan.customized=true;
     await DB.put('plans',plan); renderPlan(); renderHome();
     toast(`${days[from]} ↔ ${days[to]} 훈련 교환됨`);
   }));
@@ -4318,7 +4320,7 @@ async function syncPlansWithRecords(){
       }
     }
     plan.target=Math.round(plan.sessions.reduce((s,x)=>s+(x.km||0),0));
-    plan.lastSyncedAt=Date.now(); changed.add(plan.weekStart);
+    plan.lastSyncedAt=Date.now(); plan.customized=true; changed.add(plan.weekStart);
   }
   for(const key of changed) await DB.put('plans',state.plans[key]);
   return changed.size;
@@ -4408,7 +4410,7 @@ function openNsmGuide(){
   $('#ng_gen').onclick = async()=>{
     if(!m.count){ toast('먼저 기록을 첨부하세요'); closeSheet(); go('records'); return; }
     const monday = new Date(mondayOf(Date.now())); monday.setDate(monday.getDate()+state.planWeekOffset*7);
-    generatePlan(monday); await syncPlansWithRecords(); closeSheet(); go('plan'); renderPlan(); toast('NSM 플랜 생성됨');
+    generatePlan(monday,true); await syncPlansWithRecords(); closeSheet(); go('plan'); renderPlan(); toast('NSM 플랜 생성됨');
   };
 }
 $('#btnNsmGuide').onclick = openNsmGuide;
@@ -4416,7 +4418,7 @@ $('#btnNsmGuide').onclick = openNsmGuide;
 $('#btnGenPlan').onclick = async()=>{
   const monday = new Date(mondayOf(Date.now())); monday.setDate(monday.getDate()+state.planWeekOffset*7);
   if(!state.metrics.count){ toast('먼저 기록을 첨부하세요'); go('records'); return; }
-  generatePlan(monday); await syncPlansWithRecords(); renderPlan(); toast('플랜을 생성했어요');
+  generatePlan(monday,true); await syncPlansWithRecords(); renderPlan(); toast('플랜을 생성했어요');
 };
 $('#btnPrevWeek').onclick = ()=>{ state.planWeekOffset--; renderPlan(); };
 $('#btnNextWeek').onclick = ()=>{ state.planWeekOffset++; renderPlan(); };
@@ -4444,7 +4446,7 @@ function renderPlanDayChips(){
       if(hint) hint.textContent = `· ${days.length}일 일정`;
       if(state.metrics && state.metrics.count){
         const monday = new Date(mondayOf(Date.now())); monday.setDate(monday.getDate()+state.planWeekOffset*7);
-        generatePlan(monday); await syncPlansWithRecords(); renderPlan();
+        generatePlan(monday,true); await syncPlansWithRecords(); renderPlan();
         toast(`${days.length}일 일정으로 플랜을 갱신했어요`);
       }
     };
@@ -4456,7 +4458,7 @@ async function setPlanStyle(style){
   renderStyleToggle();
   if(!state.metrics.count){ toast('먼저 기록을 첨부하세요'); return; }
   const monday = new Date(mondayOf(Date.now())); monday.setDate(monday.getDate()+state.planWeekOffset*7);
-  generatePlan(monday); await syncPlansWithRecords(); renderPlan();
+  generatePlan(monday,true); await syncPlansWithRecords(); renderPlan();
   toast(style==='mixed'?'다양한 훈련 플랜으로 생성했어요':'NSM 중심 플랜으로 생성했어요');
 }
 $('#btnStyleNsm').onclick = ()=> setPlanStyle('nsm');
@@ -5531,7 +5533,7 @@ $('#btnSettings').onclick = ()=>{
     // 스타일·가능요일이 바뀌었으면 이번 주 플랜 재생성
     if((prevStyle!==state.settings.planStyle || prevDays!==JSON.stringify(getAvailableDays())) && state.metrics.count){
       const monday = new Date(mondayOf(Date.now())); monday.setDate(monday.getDate()+state.planWeekOffset*7);
-      generatePlan(monday);
+      generatePlan(monday,true);
     }
     recompute(); closeSheet(); renderHome(); renderRunTab(); toast('설정 저장됨');
   };
