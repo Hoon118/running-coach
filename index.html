@@ -7,7 +7,7 @@
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
 <meta name="apple-mobile-web-app-title" content="런코치" />
 <meta name="theme-color" content="#0b0f14" />
-<link rel="manifest" href="manifest.json?v=39" />
+<link rel="manifest" href="manifest.json?v=41" />
 <link rel="apple-touch-icon" href="icon-192.png" />
 <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />
 <meta http-equiv="Pragma" content="no-cache" />
@@ -100,6 +100,9 @@ main{padding:16px 16px 24px;max-width:640px;margin:0 auto}
 .tag.lsd{background:rgba(74,168,255,.16);color:var(--blue)}
 .tag.recovery{background:rgba(57,217,138,.16);color:var(--ok)}
 .tag.easy{background:rgba(142,160,182,.16);color:var(--sub)}
+.tag.fartlek{background:rgba(255,106,61,.16);color:var(--acc)}
+.tag.progression{background:rgba(57,217,138,.16);color:var(--ok)}
+.tag.hill{background:rgba(167,139,250,.16);color:var(--purple)}
 .tag.rest{background:rgba(107,125,148,.14);color:var(--mut)}
 .tag.race{background:rgba(255,106,61,.18);color:var(--acc)}
 
@@ -139,6 +142,18 @@ textarea{min-height:90px;resize:vertical}
 .chk{width:26px;height:26px;border-radius:8px;border:2px solid var(--line);display:flex;align-items:center;
   justify-content:center;flex-shrink:0;font-size:14px;color:var(--ok)}
 .chk.on{background:rgba(57,217,138,.15);border-color:var(--ok)}
+.plan-actions{display:flex;flex-wrap:wrap;gap:6px;margin-top:9px}
+.plan-actions select{width:auto;max-width:112px;padding:7px 9px;font-size:12px;border-radius:9px}
+.plan-feedback{margin-top:8px;padding:9px 10px;border-radius:10px;background:var(--bg2);border-left:3px solid var(--ok);font-size:11.5px;line-height:1.55;color:var(--sub)}
+.plan-feedback.warn{border-left-color:var(--warn)}
+.train-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.train-card{padding:13px;border:1px solid var(--line);border-radius:14px;background:var(--card);text-align:left}
+.train-card .train-title{font-size:14px;font-weight:800;margin:7px 0 4px}
+.train-card .train-desc{font-size:11px;color:var(--sub);line-height:1.5;min-height:49px}
+.train-card .train-use{font-size:11px;color:var(--acc2);font-weight:700;margin-top:8px}
+.preset-row{padding:11px 12px;border-radius:12px;background:var(--bg2);border:1px solid var(--line);margin-bottom:8px}
+.preset-row .p-title{font-size:13px;font-weight:800}
+.preset-row .p-desc{font-size:11px;color:var(--sub);line-height:1.5;margin-top:3px}
 
 /* 설정: 스위치/체크 행 */
 .switchrow{display:flex;align-items:center;justify-content:space-between;gap:10px;font-size:14px;font-weight:600;margin-top:6px}
@@ -284,7 +299,7 @@ canvas.chart{width:100%;height:150px;display:block}
       <div class="chartbox"><canvas class="chart" id="chartWeekly" height="150"></canvas></div>
     </div>
 
-    <button class="btn primary block" onclick="go('run')">▶︎ 러닝 시작</button>
+    <button class="btn primary block" onclick="go('run')">🏃 훈련 선택</button>
   </section>
 
   <!-- ================= 훈련 플랜 ================= -->
@@ -315,7 +330,7 @@ canvas.chart{width:100%;height:150px;display:block}
         <button class="btn ghost sm" id="btnNextWeek">다음 주 ›</button>
       </div>
     </div>
-    <div class="note">플랜은 최근 부하(급성/만성)와 추정 레이스 페이스(VDOT)를 바탕으로 자동 계산됩니다. <b>NSM 중심</b>은 역치 바로 아래(서브스레숄드) 반복을 주축으로, <b>다양한 훈련</b>은 인터벌(VO2max)·템포(역치)·LSD·이지·리커버리를 폴라라이즈드로 배치합니다. 인터벌·템포·NSM 세션은 <b>▶︎ 러닝</b> 버튼으로 실행하면 단계마다 <b>음성 안내</b>가 나옵니다. 점진적 과부하 10% 룰과 ACWR 안전구간을 지켜 설계했습니다.</div>
+    <div class="note">플랜은 최근 부하(급성/만성)와 추정 레이스 페이스(VDOT)를 바탕으로 자동 계산됩니다. 각 요일의 <b>훈련 변경</b>에서 종류·거리·페이스·심박·반복을 직접 수정하고, 요일 선택으로 두 세션을 교환할 수 있습니다. 업로드 기록은 해당 날짜 플랜과 자동 비교되어 수행도와 피드백이 표시되며, 다른 훈련을 했다면 남은 핵심 세션을 안전한 날로 옮기거나 회복 세션으로 조정합니다.</div>
   </section>
 
   <!-- ================= 기록 ================= -->
@@ -352,9 +367,19 @@ canvas.chart{width:100%;height:150px;display:block}
     <div id="recList"></div>
   </section>
 
-  <!-- ================= 실시간 러닝 ================= -->
+  <!-- ================= 훈련 라이브러리 / 편집 ================= -->
   <section class="page" id="page-run">
     <div class="card">
+      <h2>훈련 라이브러리</h2>
+      <div class="desc">목적과 대회 거리에 맞는 훈련을 고른 뒤 횟수·거리·페이스·심박을 직접 수정해 주간 플랜에 넣으세요.</div>
+      <div id="trainingLibrary" class="train-grid"></div>
+    </div>
+    <div class="card">
+      <h2>5K · 10K · 하프 · 풀 코스별 훈련</h2>
+      <div class="desc">코스별 권장 인터벌·템포·지속주·LSD 구성을 바로 불러와 수정할 수 있습니다.</div>
+      <div id="coursePresets"></div>
+    </div>
+    <div class="card" style="display:none">
       <div style="display:flex;justify-content:space-between;align-items:center">
         <div><span class="gpsdot" id="gpsDot"></span><span id="gpsText" style="font-size:12px;color:var(--sub)">GPS 대기중</span></div>
         <select id="runType" style="width:auto;padding:6px 10px;font-size:12px">
@@ -459,7 +484,7 @@ canvas.chart{width:100%;height:150px;display:block}
 <nav class="tabbar">
   <button data-tab="home" class="active"><span class="ic">🏠</span>홈</button>
   <button data-tab="plan"><span class="ic">📋</span>플랜</button>
-  <button data-tab="run" class="run"><span class="ic">🏃</span>러닝</button>
+  <button data-tab="run" class="run"><span class="ic">🏃</span>훈련</button>
   <button data-tab="records"><span class="ic">📎</span>기록</button>
   <button data-tab="analysis"><span class="ic">📊</span>분석</button>
 </nav>
@@ -470,6 +495,6 @@ canvas.chart{width:100%;height:150px;display:block}
 </div>
 <div class="toast" id="toast"></div>
 
-<script src="app.js?v=39"></script>
+<script src="app.js?v=41"></script>
 </body>
 </html>
